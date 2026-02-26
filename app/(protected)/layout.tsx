@@ -7,6 +7,7 @@ import {
   LogOut,
   Megaphone,
   PanelLeft,
+  Shield,
   UserRound,
 } from "lucide-react";
 import { useEffect, useSyncExternalStore } from "react";
@@ -53,9 +54,10 @@ const subscribeToSidebarCollapsed = (
 
 const sidebarLinks = [
   { href: "/profile", label: "Profile", icon: UserRound },
-  { href: "/marketing", label: "Marketing", icon: Megaphone },
   { href: "/my-work", label: "My Work", icon: LayoutDashboard },
+  { href: "/marketing", label: "Marketing", icon: Megaphone },
   { href: "/development", label: "Development", icon: Code2 },
+  { href: "/admin", label: "Admin", icon: Shield },
 ];
 
 export default function ProtectedLayout({

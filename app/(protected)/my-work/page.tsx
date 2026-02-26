@@ -3,38 +3,23 @@
 
 import Link from "next/link";
 import {
-  closestCenter,
-  DndContext,
-  DragEndEvent,
-  PointerSensor,
-  useSensor,
-  useSensors,
-} from "@dnd-kit/core";
-import {
-  SortableContext,
-  arrayMove,
-  useSortable,
-  verticalListSortingStrategy,
-} from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
-import {
   AlertTriangle,
+  ArrowUpDown,
+  BadgeAlert,
   CalendarClock,
   CalendarDays,
   Check,
   CircleAlert,
   Flame,
-  GripVertical,
-  Pin,
-  PinOff,
+  Plus,
   Repeat,
   Search,
+  Target,
   Trash2,
   X,
 } from "lucide-react";
 import {
   FormEvent,
-  MouseEvent,
   useEffect,
   useMemo,
   useRef,
@@ -91,17 +76,29 @@ const getHydratedServerSnapshot = () => false;
 type MyWorkTab = "overdue" | "today" | "week" | "recurring";
 type MyWorkStatusFilter = MarketingTaskStatus | typeof ALL_FILTER_VALUE;
 type MyWorkPriorityFilter = MarketingTaskPriority | typeof ALL_FILTER_VALUE;
+type MyWorkQueueSort = "due" | "priority" | "project";
+
+type MyWorkCustomTodo = {
+  id: string;
+  title: string;
+  hours: number;
+  done: boolean;
+};
 
 type MyWorkFilters = {
   search: string;
   status: MyWorkStatusFilter;
   priority: MyWorkPriorityFilter;
+  onlyOpen: boolean;
+  onlyBlocked: boolean;
 };
 
 type MyWorkUserPreferences = {
   activeTab: MyWorkTab;
   filters: MyWorkFilters;
-  pinnedTaskKeys: string[];
+  queueSort: MyWorkQueueSort;
+  focusedTaskKeys: string[];
+  customTodos: MyWorkCustomTodo[];
 };
 
 type MyWorkPreferencesByUser = Record<string, MyWorkUserPreferences>;
@@ -130,12 +127,16 @@ const createDefaultFilters = (): MyWorkFilters => ({
   search: "",
   status: ALL_FILTER_VALUE,
   priority: ALL_FILTER_VALUE,
+  onlyOpen: false,
+  onlyBlocked: false,
 });
 
 const createDefaultPreferences = (): MyWorkUserPreferences => ({
   activeTab: "today",
   filters: createDefaultFilters(),
-  pinnedTaskKeys: [],
+  queueSort: "due",
+  focusedTaskKeys: [],
+  customTodos: [],
 });
 
 const isMyWorkTab = (value: unknown): value is MyWorkTab => {
@@ -161,6 +162,10 @@ const isMyWorkPriorityFilter = (
     value === ALL_FILTER_VALUE ||
     TASK_PRIORITY_OPTIONS.includes(value as MarketingTaskPriority)
   );
+};
+
+const isMyWorkQueueSort = (value: unknown): value is MyWorkQueueSort => {
+  return value === "due" || value === "priority" || value === "project";
 };
 
 const parseMyWorkPreferencesByUser = (
@@ -208,12 +213,49 @@ const parseMyWorkPreferencesByUser = (
           priority: isMyWorkPriorityFilter(filtersValue.priority)
             ? filtersValue.priority
             : ALL_FILTER_VALUE,
+          onlyOpen:
+            typeof filtersValue.onlyOpen === "boolean" ? filtersValue.onlyOpen : false,
+          onlyBlocked:
+            typeof filtersValue.onlyBlocked === "boolean"
+              ? filtersValue.onlyBlocked
+              : false,
         };
 
-        const pinnedTaskKeys = Array.isArray(typedPreference.pinnedTaskKeys)
-          ? typedPreference.pinnedTaskKeys.filter(
+        const focusedTaskKeys = Array.isArray(typedPreference.focusedTaskKeys)
+          ? typedPreference.focusedTaskKeys.filter(
               (taskKey): taskKey is string => typeof taskKey === "string"
             )
+          : [];
+        const customTodos = Array.isArray(typedPreference.customTodos)
+          ? typedPreference.customTodos
+              .map((todo) => {
+                if (!todo || typeof todo !== "object") {
+                  return null;
+                }
+
+                const typedTodo = todo as Partial<MyWorkCustomTodo>;
+                if (
+                  typeof typedTodo.id !== "string" ||
+                  typeof typedTodo.title !== "string"
+                ) {
+                  return null;
+                }
+
+                const parsedHours =
+                  typeof typedTodo.hours === "number" &&
+                  Number.isFinite(typedTodo.hours) &&
+                  typedTodo.hours >= 0
+                    ? typedTodo.hours
+                    : 0;
+
+                return {
+                  id: typedTodo.id,
+                  title: typedTodo.title,
+                  hours: parsedHours,
+                  done: typedTodo.done === true,
+                } satisfies MyWorkCustomTodo;
+              })
+              .filter((todo): todo is MyWorkCustomTodo => todo !== null)
           : [];
 
         return [
@@ -223,7 +265,11 @@ const parseMyWorkPreferencesByUser = (
               ? typedPreference.activeTab
               : defaults.activeTab,
             filters: nextFilters,
-            pinnedTaskKeys,
+            queueSort: isMyWorkQueueSort(typedPreference.queueSort)
+              ? typedPreference.queueSort
+              : defaults.queueSort,
+            focusedTaskKeys,
+            customTodos,
           },
         ] as const;
       }
@@ -301,6 +347,16 @@ const getWeekDatesForReference = (referenceDateMs: number): WeekDateEntry[] => {
 
 const getTaskKey = (projectId: string, taskId: string): string =>
   `${projectId}::${taskId}`;
+
+const getCustomTodoKey = (todoId: string): string => `custom::${todoId}`;
+
+const createMyWorkCustomTodoId = (): string => {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+};
 
 const parseTaskKey = (
   taskKey: string
@@ -390,6 +446,10 @@ const matchesFilters = (task: MarketingTask, filters: MyWorkFilters): boolean =>
     return false;
   }
 
+  if (filters.onlyOpen && task.status === "Done") {
+    return false;
+  }
+
   return true;
 };
 
@@ -432,78 +492,42 @@ const getFocusBucket = (
   return 99;
 };
 
-type SortablePlanItemProps = {
-  entry: TaskEntry;
-  todayIsoDate: string;
-  isPinned: boolean;
-  onOpenTask: (entry: TaskEntry) => void;
-  onTogglePin: (taskKey: string) => void;
+const getPriorityWeight = (priority: MarketingTaskPriority): number => {
+  if (priority === "High") {
+    return 0;
+  }
+  if (priority === "Medium") {
+    return 1;
+  }
+  return 2;
 };
 
-function SortablePlanItem({
-  entry,
-  todayIsoDate,
-  isPinned,
-  onOpenTask,
-  onTogglePin,
-}: SortablePlanItemProps) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
-    useSortable({
-      id: entry.key,
-    });
-
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.7 : 1,
-  };
-
-  const onRemovePin = (event: MouseEvent<HTMLButtonElement>) => {
-    event.stopPropagation();
-    onTogglePin(entry.key);
-  };
-
-  return (
-    <li
-      ref={setNodeRef}
-      style={style}
-      onClick={() => onOpenTask(entry)}
-      className="cursor-pointer rounded-md border border-black/10 bg-white p-3 shadow-sm transition hover:-translate-y-0.5 hover:shadow"
-    >
-      <div className="flex items-start gap-2">
-        <button
-          type="button"
-          className="mt-0.5 cursor-grab rounded border border-black/15 p-1 text-black/60 active:cursor-grabbing"
-          title="Reorder"
-          aria-label="Reorder"
-          onClick={(event) => event.stopPropagation()}
-          {...attributes}
-          {...listeners}
-        >
-          <GripVertical className="h-3.5 w-3.5" />
-        </button>
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-semibold">{entry.task.title}</p>
-          <p className="mt-0.5 text-xs text-black/60">{entry.project.name}</p>
-          <p className="mt-1 text-xs text-black/70">
-            {entry.task.dueDate || "No due date"} · {getDueLabel(entry.task.dueDate, todayIsoDate)}
-          </p>
-        </div>
-        {isPinned ? (
-          <button
-            type="button"
-            onClick={onRemovePin}
-            aria-label="Unpin"
-            title="Unpin"
-            className="rounded border border-black/15 p-1.5 hover:bg-black/5"
-          >
-            <PinOff className="h-3.5 w-3.5" />
-          </button>
-        ) : null}
-      </div>
-    </li>
-  );
-}
+const getFocusReasonLabel = (
+  task: MarketingTask,
+  todayIsoDate: string,
+  weekEndIsoDate: string
+): string => {
+  const bucket = getFocusBucket(task, todayIsoDate, weekEndIsoDate);
+  if (bucket === 0) {
+    return "Overdue · High";
+  }
+  if (bucket === 1) {
+    return "Overdue";
+  }
+  if (bucket === 2) {
+    return "Due today · High";
+  }
+  if (bucket === 3) {
+    return "Due today";
+  }
+  if (bucket === 4) {
+    return "Due this week · High";
+  }
+  if (bucket === 5) {
+    return "Due this week";
+  }
+  return "Watch";
+};
 
 export default function MyWorkPage() {
   const isHydrated = useSyncExternalStore(
@@ -540,7 +564,11 @@ export default function MyWorkPage() {
 
   const [activeTab, setActiveTab] = useState<MyWorkTab>("today");
   const [filters, setFilters] = useState<MyWorkFilters>(createDefaultFilters);
-  const [pinnedTaskKeys, setPinnedTaskKeys] = useState<string[]>([]);
+  const [focusedTaskKeys, setFocusedTaskKeys] = useState<string[]>([]);
+  const [customTodos, setCustomTodos] = useState<MyWorkCustomTodo[]>([]);
+  const [queueSort, setQueueSort] = useState<MyWorkQueueSort>("due");
+  const [newCustomTodoTitle, setNewCustomTodoTitle] = useState("");
+  const [newCustomTodoHours, setNewCustomTodoHours] = useState("");
   const [didLoadPreferences, setDidLoadPreferences] = useState(false);
 
   const [modalTaskKey, setModalTaskKey] = useState<string | null>(null);
@@ -625,7 +653,9 @@ export default function MyWorkPage() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setActiveTab(userPreferences.activeTab);
     setFilters(userPreferences.filters);
-    setPinnedTaskKeys(userPreferences.pinnedTaskKeys);
+    setFocusedTaskKeys(userPreferences.focusedTaskKeys);
+    setCustomTodos(userPreferences.customTodos);
+    setQueueSort(userPreferences.queueSort);
     setDidLoadPreferences(true);
   }, [userName]);
 
@@ -640,14 +670,24 @@ export default function MyWorkPage() {
     allPreferences[userName] = {
       activeTab,
       filters,
-      pinnedTaskKeys,
+      focusedTaskKeys,
+      customTodos,
+      queueSort,
     };
 
     window.localStorage.setItem(
       MY_WORK_PREFS_STORAGE_KEY,
       JSON.stringify(allPreferences)
     );
-  }, [activeTab, didLoadPreferences, filters, pinnedTaskKeys, userName]);
+  }, [
+    activeTab,
+    customTodos,
+    didLoadPreferences,
+    filters,
+    focusedTaskKeys,
+    queueSort,
+    userName,
+  ]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -672,9 +712,48 @@ export default function MyWorkPage() {
     };
   }, [deleteTarget, modalTaskKey]);
 
+  const unresolvedDependencyCountByTaskKey = useMemo(() => {
+    const counts = new Map<string, number>();
+
+    Object.entries(tasksByProject).forEach(([projectId, projectTasks]) => {
+      const statusByTaskId = new Map(
+        projectTasks.map((task) => [task.id, task.status] as const)
+      );
+
+      projectTasks.forEach((task) => {
+        const unresolvedDependencies = task.dependencyTaskIds.reduce((count, dependencyId) => {
+          const dependencyStatus = statusByTaskId.get(dependencyId);
+          if (!dependencyStatus || dependencyStatus !== "Done") {
+            return count + 1;
+          }
+          return count;
+        }, 0);
+
+        counts.set(getTaskKey(projectId, task.id), unresolvedDependencies);
+      });
+    });
+
+    return counts;
+  }, [tasksByProject]);
+
   const filteredEntries = useMemo(() => {
-    return taskEntries.filter((entry) => matchesFilters(entry.task, filters));
-  }, [filters, taskEntries]);
+    return taskEntries.filter((entry) => {
+      if (!matchesFilters(entry.task, filters)) {
+        return false;
+      }
+
+      if (!filters.onlyBlocked) {
+        return true;
+      }
+
+      const unresolvedDependencies =
+        unresolvedDependencyCountByTaskKey.get(entry.key) ?? 0;
+      return (
+        entry.task.status !== "Done" &&
+        (entry.task.blockerReason.trim().length > 0 || unresolvedDependencies > 0)
+      );
+    });
+  }, [filters, taskEntries, unresolvedDependencyCountByTaskKey]);
 
   const overdueEntries = useMemo(() => {
     return filteredEntries
@@ -769,7 +848,55 @@ export default function MyWorkPage() {
     [taskEntries]
   );
 
-  const focusEntries = useMemo(() => {
+  const blockedCount = useMemo(
+    () =>
+      taskEntries.filter((entry) => {
+        if (entry.task.status === "Done") {
+          return false;
+        }
+
+        const unresolvedDependencies =
+          unresolvedDependencyCountByTaskKey.get(entry.key) ?? 0;
+        return (
+          entry.task.blockerReason.trim().length > 0 || unresolvedDependencies > 0
+        );
+      }).length,
+    [taskEntries, unresolvedDependencyCountByTaskKey]
+  );
+
+  const openAssignedCount = useMemo(
+    () => taskEntries.filter((entry) => entry.task.status !== "Done").length,
+    [taskEntries]
+  );
+
+  const totalAssignedHoursOpen = useMemo(
+    () =>
+      taskEntries
+        .filter((entry) => entry.task.status !== "Done")
+        .reduce((sum, entry) => sum + entry.task.hoursAssigned, 0),
+    [taskEntries]
+  );
+
+  const totalTimeSpentOpen = useMemo(
+    () =>
+      taskEntries
+        .filter((entry) => entry.task.status !== "Done")
+        .reduce((sum, entry) => sum + entry.task.timeSpent, 0),
+    [taskEntries]
+  );
+
+  const utilizationPercent = useMemo(() => {
+    if (totalAssignedHoursOpen <= 0) {
+      return 0;
+    }
+
+    return Math.min(
+      100,
+      Math.round((totalTimeSpentOpen / totalAssignedHoursOpen) * 100)
+    );
+  }, [totalAssignedHoursOpen, totalTimeSpentOpen]);
+
+  const suggestedFocusEntries = useMemo(() => {
     return taskEntries
       .map((entry) => ({
         entry,
@@ -793,11 +920,19 @@ export default function MyWorkPage() {
       .map((item) => item.entry);
   }, [taskEntries, todayIsoDate, weekEndIsoDate]);
 
-  const pinnedEntries = useMemo(() => {
-    return pinnedTaskKeys
+  const focusedTaskEntries = useMemo(() => {
+    return focusedTaskKeys
       .map((taskKey) => taskEntryByKey.get(taskKey) ?? null)
       .filter((entry): entry is TaskEntry => entry !== null);
-  }, [pinnedTaskKeys, taskEntryByKey]);
+  }, [focusedTaskKeys, taskEntryByKey]);
+
+  const focusEntries = useMemo(() => {
+    const manualTaskKeys = new Set(focusedTaskEntries.map((entry) => entry.key));
+    const suggested = suggestedFocusEntries.filter(
+      (entry) => !manualTaskKeys.has(entry.key)
+    );
+    return [...focusedTaskEntries, ...suggested];
+  }, [focusedTaskEntries, suggestedFocusEntries]);
 
   const modalEntry = modalTaskKey ? taskEntryByKey.get(modalTaskKey) ?? null : null;
   const modalProjectMembers = modalEntry?.members ?? [];
@@ -814,14 +949,69 @@ export default function MyWorkPage() {
     );
   }, [currentWeekDates, modalDueDate, modalIsRecurringTask, modalRecurringDays]);
 
-  const queueEntriesByTab: Record<MyWorkTab, TaskEntry[]> = {
-    overdue: overdueEntries,
-    today: todayEntries,
-    week: weekEntries,
-    recurring: recurringEntries,
-  };
+  const currentQueueEntries = useMemo(() => {
+    if (activeTab === "overdue") {
+      return overdueEntries;
+    }
+    if (activeTab === "today") {
+      return todayEntries;
+    }
+    if (activeTab === "week") {
+      return weekEntries;
+    }
+    return recurringEntries;
+  }, [activeTab, overdueEntries, recurringEntries, todayEntries, weekEntries]);
+  const sortedQueueEntries = useMemo(() => {
+    const entries = [...currentQueueEntries];
 
-  const currentQueueEntries = queueEntriesByTab[activeTab] ?? [];
+    if (queueSort === "project") {
+      return entries.sort((firstEntry, secondEntry) => {
+        if (firstEntry.project.name !== secondEntry.project.name) {
+          return firstEntry.project.name.localeCompare(secondEntry.project.name);
+        }
+
+        if (firstEntry.task.dueDate !== secondEntry.task.dueDate) {
+          return firstEntry.task.dueDate.localeCompare(secondEntry.task.dueDate);
+        }
+
+        return firstEntry.task.title.localeCompare(secondEntry.task.title);
+      });
+    }
+
+    if (queueSort === "priority") {
+      return entries.sort((firstEntry, secondEntry) => {
+        const priorityDiff =
+          getPriorityWeight(firstEntry.task.priority) -
+          getPriorityWeight(secondEntry.task.priority);
+        if (priorityDiff !== 0) {
+          return priorityDiff;
+        }
+
+        if (firstEntry.task.dueDate !== secondEntry.task.dueDate) {
+          return firstEntry.task.dueDate.localeCompare(secondEntry.task.dueDate);
+        }
+
+        return firstEntry.task.title.localeCompare(secondEntry.task.title);
+      });
+    }
+
+    return entries.sort((firstEntry, secondEntry) => {
+      const firstDueDate = firstEntry.task.dueDate || "9999-12-31";
+      const secondDueDate = secondEntry.task.dueDate || "9999-12-31";
+      if (firstDueDate !== secondDueDate) {
+        return firstDueDate.localeCompare(secondDueDate);
+      }
+
+      const priorityDiff =
+        getPriorityWeight(firstEntry.task.priority) -
+        getPriorityWeight(secondEntry.task.priority);
+      if (priorityDiff !== 0) {
+        return priorityDiff;
+      }
+
+      return firstEntry.task.title.localeCompare(secondEntry.task.title);
+    });
+  }, [currentQueueEntries, queueSort]);
 
   const openQueueTab = (tab: MyWorkTab) => {
     setActiveTab(tab);
@@ -840,14 +1030,75 @@ export default function MyWorkPage() {
     writeMarketingTasksForProject(projectId, updater(currentTasks));
   };
 
-  const togglePin = (taskKey: string) => {
-    setPinnedTaskKeys((currentKeys) => {
-      if (currentKeys.includes(taskKey)) {
-        return currentKeys.filter((currentKey) => currentKey !== taskKey);
-      }
+  const moveTaskToFocus = (taskKey: string) => {
+    setFocusedTaskKeys((currentKeys) =>
+      currentKeys.includes(taskKey) ? currentKeys : [...currentKeys, taskKey]
+    );
+  };
 
-      return [...currentKeys, taskKey];
-    });
+  const removeTaskFromFocus = (taskKey: string) => {
+    setFocusedTaskKeys((currentKeys) =>
+      currentKeys.filter((currentKey) => currentKey !== taskKey)
+    );
+  };
+
+  const addCustomTodo = () => {
+    const trimmedTitle = newCustomTodoTitle.trim();
+    if (!trimmedTitle) {
+      return;
+    }
+
+    const parsedHours = Number(newCustomTodoHours);
+    const safeHours =
+      Number.isFinite(parsedHours) && parsedHours >= 0 ? parsedHours : 0;
+
+    const nextTodo: MyWorkCustomTodo = {
+      id: createMyWorkCustomTodoId(),
+      title: trimmedTitle,
+      hours: safeHours,
+      done: false,
+    };
+
+    setCustomTodos((currentTodos) => [...currentTodos, nextTodo]);
+    setNewCustomTodoTitle("");
+    setNewCustomTodoHours("");
+  };
+
+  const updateCustomTodoHours = (todoId: string, nextRawValue: string) => {
+    const parsedHours = Number(nextRawValue);
+    if (!Number.isFinite(parsedHours) || parsedHours < 0) {
+      return;
+    }
+
+    setCustomTodos((currentTodos) =>
+      currentTodos.map((todo) =>
+        todo.id === todoId
+          ? {
+              ...todo,
+              hours: parsedHours,
+            }
+          : todo
+      )
+    );
+  };
+
+  const toggleCustomTodoDone = (todoId: string) => {
+    setCustomTodos((currentTodos) =>
+      currentTodos.map((todo) =>
+        todo.id === todoId
+          ? {
+              ...todo,
+              done: !todo.done,
+            }
+          : todo
+      )
+    );
+  };
+
+  const removeCustomTodo = (todoId: string) => {
+    setCustomTodos((currentTodos) =>
+      currentTodos.filter((todo) => todo.id !== todoId)
+    );
   };
 
   const openTaskModal = (entry: TaskEntry) => {
@@ -896,11 +1147,14 @@ export default function MyWorkPage() {
       return;
     }
 
+    const modalKey = getTaskKey(deleteTarget.projectId, deleteTarget.taskId);
     updateProjectTasks(deleteTarget.projectId, (projectTasks) =>
       projectTasks.filter((task) => task.id !== deleteTarget.taskId)
     );
+    setFocusedTaskKeys((currentKeys) =>
+      currentKeys.filter((currentKey) => currentKey !== modalKey)
+    );
 
-    const modalKey = getTaskKey(deleteTarget.projectId, deleteTarget.taskId);
     if (modalTaskKey === modalKey) {
       closeTaskModal();
     }
@@ -1075,33 +1329,6 @@ export default function MyWorkPage() {
     setFilters(createDefaultFilters());
   };
 
-  const sensors = useSensors(
-    useSensor(PointerSensor, {
-      activationConstraint: {
-        distance: 8,
-      },
-    })
-  );
-
-  const onPinnedDragEnd = (event: DragEndEvent) => {
-    const activeId = String(event.active.id);
-    const overId = event.over ? String(event.over.id) : null;
-
-    if (!overId || activeId === overId) {
-      return;
-    }
-
-    setPinnedTaskKeys((currentKeys) => {
-      const oldIndex = currentKeys.indexOf(activeId);
-      const newIndex = currentKeys.indexOf(overId);
-      if (oldIndex === -1 || newIndex === -1) {
-        return currentKeys;
-      }
-
-      return arrayMove(currentKeys, oldIndex, newIndex);
-    });
-  };
-
   const getEmptyMessage = (tab: MyWorkTab): string => {
     if (tab === "overdue") {
       return "No overdue tasks. Keep it going.";
@@ -1124,20 +1351,48 @@ export default function MyWorkPage() {
   }
 
   return (
-    <div className="space-y-6">
-      <header className="rounded-xl border border-black/10 bg-gradient-to-r from-white to-black/[0.02] p-5 shadow-sm">
-        <p className="text-xs font-semibold uppercase tracking-wide text-black/50">
-          My Work
+    <div className="space-y-5">
+      <header className="rounded-2xl border border-slate-200 bg-gradient-to-r from-white via-slate-50 to-slate-100 p-5 shadow-sm">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+              My Work
+            </p>
+            <h1 className="mt-1 text-2xl font-semibold tracking-tight text-slate-900 sm:text-3xl">
+              {user.name} Command Center
+            </h1>
+            <p className="mt-1 text-sm text-slate-600">
+              {todayIsoDate} · {openAssignedCount} open items · {blockedCount} blocked
+            </p>
+          </div>
+          <div className="rounded-lg border border-slate-200 bg-white/90 px-3 py-2 text-xs text-slate-600">
+            Prioritize overdue/high-priority work first, then pull from this week.
+          </div>
+        </div>
+
+        <div className="mt-4 h-2 rounded-full bg-slate-200">
+          <div
+            className={`h-full rounded-full ${
+              utilizationPercent >= 90
+                ? "bg-red-500"
+                : utilizationPercent >= 70
+                  ? "bg-yellow-500"
+                  : "bg-emerald-500"
+            }`}
+            style={{ width: `${Math.max(0, Math.min(100, utilizationPercent))}%` }}
+          />
+        </div>
+        <p className="mt-2 text-xs text-slate-600">
+          Time tracked vs allocated (open tasks): {formatHours(totalTimeSpentOpen)} /{" "}
+          {formatHours(totalAssignedHoursOpen || 0)} ({utilizationPercent}%)
         </p>
-        <h1 className="mt-1 text-2xl font-semibold">{user.name} command center</h1>
-        <p className="mt-1 text-sm text-black/60">{todayIsoDate}</p>
       </header>
 
-      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+      <section className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-6">
         <button
           type="button"
           onClick={() => openQueueTab("overdue")}
-          className="rounded-xl border border-red-200 bg-red-50/70 p-3 text-left text-red-700 shadow-sm transition hover:-translate-y-0.5 hover:shadow"
+          className="rounded-xl border border-red-200 bg-red-50 p-3 text-left text-red-700 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
         >
           <div className="flex items-center justify-between gap-2">
             <span className="text-sm font-medium">Overdue</span>
@@ -1148,7 +1403,7 @@ export default function MyWorkPage() {
         <button
           type="button"
           onClick={() => openQueueTab("today")}
-          className="rounded-xl border border-yellow-200 bg-yellow-50/80 p-3 text-left text-yellow-700 shadow-sm transition hover:-translate-y-0.5 hover:shadow"
+          className="rounded-xl border border-yellow-200 bg-yellow-50 p-3 text-left text-yellow-700 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
         >
           <div className="flex items-center justify-between gap-2">
             <span className="text-sm font-medium">Due today</span>
@@ -1159,7 +1414,7 @@ export default function MyWorkPage() {
         <button
           type="button"
           onClick={() => openQueueTab("week")}
-          className="rounded-xl border border-blue-200 bg-blue-50/80 p-3 text-left text-blue-700 shadow-sm transition hover:-translate-y-0.5 hover:shadow"
+          className="rounded-xl border border-blue-200 bg-blue-50 p-3 text-left text-blue-700 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
         >
           <div className="flex items-center justify-between gap-2">
             <span className="text-sm font-medium">Due this week</span>
@@ -1170,7 +1425,7 @@ export default function MyWorkPage() {
         <button
           type="button"
           onClick={() => openQueueTab("recurring")}
-          className="rounded-xl border border-violet-200 bg-violet-50/80 p-3 text-left text-violet-700 shadow-sm transition hover:-translate-y-0.5 hover:shadow"
+          className="rounded-xl border border-violet-200 bg-violet-50 p-3 text-left text-violet-700 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
         >
           <div className="flex items-center justify-between gap-2">
             <span className="text-sm font-medium">Recurring today</span>
@@ -1181,68 +1436,106 @@ export default function MyWorkPage() {
         <button
           type="button"
           onClick={openFocusSection}
-          className="rounded-xl border border-orange-200 bg-orange-50/80 p-3 text-left text-orange-700 shadow-sm transition hover:-translate-y-0.5 hover:shadow"
+          className="rounded-xl border border-orange-200 bg-orange-50 p-3 text-left text-orange-700 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
         >
           <div className="flex items-center justify-between gap-2">
-            <span className="text-sm font-medium">High priority open</span>
+            <span className="text-sm font-medium">High priority</span>
             <Flame className="h-4 w-4" />
           </div>
           <p className="mt-2 text-2xl font-semibold leading-none">{highPriorityOpenCount}</p>
         </button>
+        <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-left text-rose-700 shadow-sm">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-sm font-medium">Blocked</span>
+            <BadgeAlert className="h-4 w-4" />
+          </div>
+          <p className="mt-2 text-2xl font-semibold leading-none">{blockedCount}</p>
+        </div>
       </section>
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_300px]">
-        <div className="space-y-6">
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_320px]">
+        <div className="flex flex-col gap-5">
           <section
             ref={focusRef}
-            className="rounded-xl border border-black/10 bg-white p-4 shadow-sm"
+            className="order-1 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
           >
             <div className="mb-3 flex items-center justify-between gap-3">
               <h2 className="text-lg font-semibold">Focus now</h2>
-              <span className="text-xs text-black/50">Top 3 next tasks</span>
+              <span className="text-xs text-slate-500">
+                {focusEntries.length} task{focusEntries.length === 1 ? "" : "s"}
+              </span>
             </div>
             {focusEntries.length === 0 ? (
-              <p className="rounded-md border border-dashed border-black/15 p-4 text-sm text-black/60">
+              <p className="rounded-md border border-dashed border-slate-300 p-4 text-sm text-slate-600">
                 No urgent focus tasks right now.
               </p>
             ) : (
               <div className="space-y-3">
                 {focusEntries.map((entry) => {
-                  const isPinned = pinnedTaskKeys.includes(entry.key);
+                  const isManualFocus = focusedTaskKeys.includes(entry.key);
+                  const unresolvedDependencies =
+                    unresolvedDependencyCountByTaskKey.get(entry.key) ?? 0;
+                  const hasBlocker = entry.task.blockerReason.trim().length > 0;
                   return (
                     <article
                       key={entry.key}
                       className={`rounded-lg border p-3 shadow-sm ${
                         entry.task.dueDate < todayIsoDate && entry.task.status !== "Done"
                           ? "border-red-200 bg-red-50/40"
-                          : "border-black/10 bg-white"
+                          : "border-slate-200 bg-white"
                       }`}
                     >
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
-                          <p className="truncate font-semibold">{entry.task.title}</p>
+                          <p className="truncate font-semibold text-slate-900">{entry.task.title}</p>
                           <Link
                             href={`/marketing/projects/${entry.projectId}`}
                             className="mt-0.5 inline-block text-xs text-blue-700 hover:underline"
                           >
                             {entry.project.name}
                           </Link>
-                          <p className="mt-1 text-xs text-black/60">
+                          <p className="mt-1 text-xs text-slate-600">
                             {entry.task.dueDate || "No due date"} · {getDueLabel(entry.task.dueDate, todayIsoDate)}
                           </p>
-                          <p className="mt-1 text-xs text-black/60">
-                            Time spent {formatHours(entry.task.timeSpent)} · Allocated --
+                          <p className="mt-1 text-xs text-slate-600">
+                            Time spent {formatHours(entry.task.timeSpent)} · Allocated{" "}
+                            {formatHours(entry.task.hoursAssigned)}
                           </p>
+                          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                            <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-[11px] text-slate-700">
+                              {getFocusReasonLabel(
+                                entry.task,
+                                todayIsoDate,
+                                weekEndIsoDate
+                              )}
+                            </span>
+                            {hasBlocker ? (
+                              <span className="rounded-full border border-red-200 bg-red-100 px-2 py-0.5 text-[11px] text-red-700">
+                                Blocker
+                              </span>
+                            ) : null}
+                            {unresolvedDependencies > 0 ? (
+                              <span className="rounded-full border border-orange-200 bg-orange-100 px-2 py-0.5 text-[11px] text-orange-700">
+                                {unresolvedDependencies} dependency
+                                {unresolvedDependencies === 1 ? "" : "ies"} open
+                              </span>
+                            ) : null}
+                            <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-[11px] text-slate-700">
+                              {isManualFocus ? "Manual focus" : "Suggested"}
+                            </span>
+                          </div>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => togglePin(entry.key)}
-                          title={isPinned ? "Unpin from Today Plan" : "Pin to Today Plan"}
-                          aria-label={isPinned ? "Unpin from Today Plan" : "Pin to Today Plan"}
-                          className="rounded border border-black/15 p-1.5 hover:bg-black/5"
-                        >
-                          <Pin className={`h-4 w-4 ${isPinned ? "fill-current" : ""}`} />
-                        </button>
+                        {isManualFocus ? (
+                          <button
+                            type="button"
+                            onClick={() => removeTaskFromFocus(entry.key)}
+                            className="rounded border border-slate-200 p-1.5 text-slate-600 hover:bg-slate-100"
+                            title="Remove from focus"
+                            aria-label="Remove from focus"
+                          >
+                            <X className="h-4 w-4" />
+                          </button>
+                        ) : null}
                       </div>
                       <div className="mt-3 flex flex-wrap items-center gap-2">
                         <span
@@ -1262,10 +1555,20 @@ export default function MyWorkPage() {
                         <button
                           type="button"
                           onClick={() => openTaskModal(entry)}
-                          className="rounded-md border border-black/15 px-2.5 py-1 text-xs font-medium hover:bg-black/5"
+                          className="rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100"
                         >
                           Open
                         </button>
+                        {!isManualFocus ? (
+                          <button
+                            type="button"
+                            onClick={() => moveTaskToFocus(entry.key)}
+                            className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                          >
+                            <Target className="h-3.5 w-3.5" />
+                            Focus
+                          </button>
+                        ) : null}
                         {entry.task.status !== "Done" ? (
                           <button
                             type="button"
@@ -1285,11 +1588,21 @@ export default function MyWorkPage() {
 
           <section
             ref={queueRef}
-            className="rounded-xl border border-black/10 bg-white p-4 shadow-sm"
+            className="order-2 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
           >
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <h2 className="text-lg font-semibold">Work queue</h2>
-              <div className="inline-flex rounded-lg border border-black/15 bg-black/[0.02] p-1">
+              <div>
+                <h2 className="text-lg font-semibold">Work queue</h2>
+                <p className="text-xs text-slate-500">
+                  {sortedQueueEntries.length} visible · sorted by{" "}
+                  {queueSort === "due"
+                    ? "due date"
+                    : queueSort === "priority"
+                      ? "priority"
+                      : "project"}
+                </p>
+              </div>
+              <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">
                 {([
                   { id: "overdue", label: "Overdue", count: overdueEntries.length },
                   { id: "today", label: "Today", count: todayEntries.length },
@@ -1303,8 +1616,8 @@ export default function MyWorkPage() {
                       onClick={() => setActiveTab(tab.id)}
                       className={`rounded-md px-3 py-1.5 text-xs font-medium ${
                         activeTab === tab.id
-                          ? "bg-black text-white"
-                          : "text-black/70 hover:bg-black/5"
+                          ? "bg-slate-900 text-white"
+                          : "text-slate-600 hover:bg-slate-100"
                       }`}
                     >
                       {tab.label} ({tab.count})
@@ -1314,9 +1627,9 @@ export default function MyWorkPage() {
               </div>
             </div>
 
-            <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-black/10 bg-black/[0.02] p-2">
-              <div className="relative min-w-[180px] flex-1">
-                <Search className="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-black/45" />
+            <div className="mt-3 flex flex-wrap items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 p-2">
+              <div className="relative w-full min-w-[160px] max-w-[220px]">
+                <Search className="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-slate-400" />
                 <input
                   type="text"
                   value={filters.search}
@@ -1326,8 +1639,8 @@ export default function MyWorkPage() {
                       search: event.target.value,
                     }))
                   }
-                  placeholder="Search"
-                  className="w-full rounded-md border border-black/15 bg-white py-1.5 pl-7 pr-2 text-sm"
+                  placeholder="Search..."
+                  className="h-8 w-full rounded-md border border-slate-200 bg-white py-1.5 pl-7 pr-2 text-sm outline-none transition focus:border-slate-400"
                 />
               </div>
               <select
@@ -1338,7 +1651,7 @@ export default function MyWorkPage() {
                     status: event.target.value as MyWorkStatusFilter,
                   }))
                 }
-                className="h-8 rounded-md border border-black/15 bg-white px-2 text-sm"
+                className="h-8 w-[120px] rounded-md border border-slate-200 bg-white px-2 text-sm"
               >
                 <option value={ALL_FILTER_VALUE}>Status</option>
                 {TASK_STATUS_OPTIONS.map((status) => (
@@ -1355,7 +1668,7 @@ export default function MyWorkPage() {
                     priority: event.target.value as MyWorkPriorityFilter,
                   }))
                 }
-                className="h-8 rounded-md border border-black/15 bg-white px-2 text-sm"
+                className="h-8 w-[120px] rounded-md border border-slate-200 bg-white px-2 text-sm"
               >
                 <option value={ALL_FILTER_VALUE}>Priority</option>
                 {TASK_PRIORITY_OPTIONS.map((priority) => (
@@ -1367,65 +1680,96 @@ export default function MyWorkPage() {
               <button
                 type="button"
                 onClick={clearFilters}
-                className="h-8 rounded-md border border-black/20 bg-white px-3 text-sm font-medium hover:bg-black/5"
+                className="h-8 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-100"
               >
                 Clear
               </button>
+              <label className="inline-flex h-8 items-center gap-1.5 rounded-full border border-slate-300 bg-white px-2.5 text-xs text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={filters.onlyOpen}
+                  onChange={(event) =>
+                    setFilters((currentFilters) => ({
+                      ...currentFilters,
+                      onlyOpen: event.target.checked,
+                    }))
+                  }
+                />
+                Open only
+              </label>
+              <label className="inline-flex h-8 items-center gap-1.5 rounded-full border border-slate-300 bg-white px-2.5 text-xs text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={filters.onlyBlocked}
+                  onChange={(event) =>
+                    setFilters((currentFilters) => ({
+                      ...currentFilters,
+                      onlyBlocked: event.target.checked,
+                    }))
+                  }
+                />
+                Blocked only
+              </label>
+              <label className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 text-xs text-slate-700">
+                <ArrowUpDown className="h-3.5 w-3.5 text-slate-400" />
+                <select
+                  value={queueSort}
+                  onChange={(event) =>
+                    setQueueSort(event.target.value as MyWorkQueueSort)
+                  }
+                  className="bg-transparent outline-none"
+                >
+                  <option value="due">Due</option>
+                  <option value="priority">Priority</option>
+                  <option value="project">Project</option>
+                </select>
+              </label>
             </div>
 
             <div className="mt-4 space-y-2">
-              {currentQueueEntries.length === 0 ? (
-                <p className="rounded-md border border-dashed border-black/15 p-4 text-sm text-black/60">
+              {sortedQueueEntries.length === 0 ? (
+                <p className="rounded-md border border-dashed border-slate-300 p-4 text-sm text-slate-600">
                   {getEmptyMessage(activeTab)}
                 </p>
               ) : (
-                currentQueueEntries.map((entry) => {
-                  const isPinned = pinnedTaskKeys.includes(entry.key);
+                sortedQueueEntries.map((entry) => {
                   const isRecurringItem =
                     activeTab === "recurring" &&
                     isRecurringForDate(entry.task, todayIsoDate, todayWeekday);
+                  const unresolvedDependencies =
+                    unresolvedDependencyCountByTaskKey.get(entry.key) ?? 0;
+                  const hasBlocker = entry.task.blockerReason.trim().length > 0;
+                  const completedSubtasks = entry.task.subtasks.filter(
+                    (subtask) => subtask.done
+                  ).length;
 
                   return (
                     <article
                       key={entry.key}
                       onClick={() => openTaskModal(entry)}
-                      className={`cursor-pointer rounded-lg border p-3 shadow-sm transition hover:-translate-y-0.5 hover:shadow ${
+                      className={`cursor-pointer rounded-lg border p-3 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md ${
                         entry.task.dueDate < todayIsoDate && entry.task.status !== "Done"
                           ? "border-red-200 bg-red-50/30"
-                          : "border-black/10 bg-white"
+                          : "border-slate-200 bg-white"
                       }`}
                     >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <p className="truncate font-medium">{entry.task.title}</p>
-                          <p className="mt-1 text-xs text-black/60">
-                            <span className="text-black/45">Project</span> ·{" "}
-                            <Link
-                              href={`/marketing/projects/${entry.projectId}`}
-                              onClick={(event) => event.stopPropagation()}
-                              className="text-blue-700 hover:underline"
-                            >
-                              {entry.project.name}
-                            </Link>
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            togglePin(entry.key);
-                          }}
-                          title={isPinned ? "Unpin" : "Pin"}
-                          aria-label={isPinned ? "Unpin" : "Pin"}
-                          className="rounded border border-black/15 p-1.5 hover:bg-black/5"
-                        >
-                          <Pin className={`h-4 w-4 ${isPinned ? "fill-current" : ""}`} />
-                        </button>
+                      <div className="min-w-0">
+                        <p className="truncate font-medium text-slate-900">{entry.task.title}</p>
+                        <p className="mt-1 text-xs text-slate-600">
+                          <span className="text-slate-400">Project</span> ·{" "}
+                          <Link
+                            href={`/marketing/projects/${entry.projectId}`}
+                            onClick={(event) => event.stopPropagation()}
+                            className="text-blue-700 hover:underline"
+                          >
+                            {entry.project.name}
+                          </Link>
+                        </p>
                       </div>
 
-                      <div className="mt-2 grid gap-2 text-xs text-black/70 sm:grid-cols-2 lg:grid-cols-6">
+                      <div className="mt-2 grid gap-2 text-xs text-slate-700 sm:grid-cols-2 lg:grid-cols-3">
                         <p>
-                          <span className="text-black/45">Status</span>
+                          <span className="text-slate-400">Status</span>
                           <span
                             className={`ml-1 inline-flex rounded-full border px-2 py-0.5 ${getStatusBadgeClasses(
                               entry.task.status
@@ -1435,7 +1779,7 @@ export default function MyWorkPage() {
                           </span>
                         </p>
                         <p>
-                          <span className="text-black/45">Priority</span>
+                          <span className="text-slate-400">Priority</span>
                           <span
                             className={`ml-1 inline-flex rounded-full border px-2 py-0.5 ${getPriorityBadgeClasses(
                               entry.task.priority
@@ -1445,24 +1789,54 @@ export default function MyWorkPage() {
                           </span>
                         </p>
                         <p>
-                          <span className="text-black/45">Due</span>
+                          <span className="text-slate-400">Due</span>
                           <span className="ml-1">{entry.task.dueDate || "--"}</span>
                         </p>
                         <p>
-                          <span className="text-black/45">Label</span>
+                          <span className="text-slate-400">Label</span>
                           <span className="ml-1">{getDueLabel(entry.task.dueDate, todayIsoDate)}</span>
                         </p>
                         <p>
-                          <span className="text-black/45">Time spent</span>
+                          <span className="text-slate-400">Time spent</span>
                           <span className="ml-1">{formatHours(entry.task.timeSpent)}</span>
                         </p>
                         <p>
-                          <span className="text-black/45">Assignee</span>
+                          <span className="text-slate-400">Assignee</span>
                           <span className="ml-1">{entry.task.assignee ?? "Unassigned"}</span>
                         </p>
                       </div>
 
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                        {hasBlocker ? (
+                          <span className="inline-flex rounded-full border border-red-200 bg-red-100 px-2 py-0.5 text-[11px] text-red-700">
+                            Blocker
+                          </span>
+                        ) : null}
+                        {unresolvedDependencies > 0 ? (
+                          <span className="inline-flex rounded-full border border-orange-200 bg-orange-100 px-2 py-0.5 text-[11px] text-orange-700">
+                            {unresolvedDependencies} dependency
+                            {unresolvedDependencies === 1 ? "" : "ies"} open
+                          </span>
+                        ) : null}
+                        {entry.task.subtasks.length > 0 ? (
+                          <span className="inline-flex rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-[11px] text-slate-700">
+                            Subtasks {completedSubtasks}/{entry.task.subtasks.length}
+                          </span>
+                        ) : null}
+                      </div>
+
                       <div className="mt-2 flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            moveTaskToFocus(entry.key);
+                          }}
+                          className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                        >
+                          <Target className="h-3.5 w-3.5" />
+                          Move to focus
+                        </button>
                         {entry.task.status !== "Done" ? (
                           <button
                             type="button"
@@ -1478,7 +1852,7 @@ export default function MyWorkPage() {
                         {isRecurringItem ? (
                           <label
                             onClick={(event) => event.stopPropagation()}
-                            className="inline-flex items-center gap-1 rounded-md border border-black/15 px-2 py-1 text-xs"
+                            className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-700"
                           >
                             <input
                               type="checkbox"
@@ -1504,42 +1878,107 @@ export default function MyWorkPage() {
           </section>
         </div>
 
-        <aside className="space-y-3 xl:sticky xl:top-6 xl:self-start">
-          <section className="rounded-xl border border-black/10 bg-white p-4 shadow-sm">
+        <aside className="xl:sticky xl:top-6 xl:self-start">
+          <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-base font-semibold">Today Plan</h2>
-              <span className="text-xs text-black/50">{pinnedEntries.length} pinned</span>
+              <h2 className="text-base font-semibold">Todo List</h2>
+              <span className="text-xs text-slate-500">
+                {customTodos.length} item{customTodos.length === 1 ? "" : "s"}
+              </span>
             </div>
 
-            {pinnedEntries.length === 0 ? (
-              <p className="rounded-md border border-dashed border-black/15 p-3 text-sm text-black/60">
-                Pin tasks to build your shortlist.
-              </p>
-            ) : (
-              <DndContext
-                sensors={sensors}
-                collisionDetection={closestCenter}
-                onDragEnd={onPinnedDragEnd}
-              >
-                <SortableContext
-                  items={pinnedEntries.map((entry) => entry.key)}
-                  strategy={verticalListSortingStrategy}
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                addCustomTodo();
+              }}
+              className="mb-3 rounded-lg border border-slate-200 bg-slate-50 p-2.5"
+            >
+              <p className="text-xs font-medium text-slate-600">Quick todo</p>
+              <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_68px_auto]">
+                <input
+                  type="text"
+                  value={newCustomTodoTitle}
+                  onChange={(event) => setNewCustomTodoTitle(event.target.value)}
+                  placeholder="Add personal task"
+                  className="h-8 min-w-0 rounded-md border border-slate-200 px-2 text-sm outline-none focus:border-slate-400"
+                />
+                <input
+                  type="number"
+                  min="0"
+                  step="0.5"
+                  value={newCustomTodoHours}
+                  onChange={(event) => setNewCustomTodoHours(event.target.value)}
+                  placeholder="h"
+                  className="h-8 rounded-md border border-slate-200 px-2 text-sm outline-none focus:border-slate-400"
+                />
+                <button
+                  type="submit"
+                  className="inline-flex h-8 items-center justify-center gap-1 rounded-md border border-slate-300 bg-white px-2 text-xs font-medium text-slate-700 hover:bg-slate-100"
                 >
-                  <ul className="space-y-2">
-                    {pinnedEntries.map((entry) => (
-                      <SortablePlanItem
-                        key={entry.key}
-                        entry={entry}
-                        todayIsoDate={todayIsoDate}
-                        isPinned={true}
-                        onOpenTask={openTaskModal}
-                        onTogglePin={togglePin}
+                  <Plus className="h-3.5 w-3.5" />
+                  Add
+                </button>
+              </div>
+            </form>
+
+            {customTodos.length > 0 ? (
+              <ul className="mt-2 space-y-2">
+                {customTodos.map((todo) => (
+                  <li
+                    key={getCustomTodoKey(todo.id)}
+                    className={`rounded-md border p-3 shadow-sm ${
+                      todo.done
+                        ? "border-emerald-200 bg-emerald-50/60"
+                        : "border-slate-200 bg-white"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-semibold text-slate-900">{todo.title}</p>
+                        <p className="mt-1 text-xs text-slate-600">
+                          Planned {formatHours(todo.hours)}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <label className="inline-flex items-center gap-1 text-xs">
+                        <input
+                          type="checkbox"
+                          checked={todo.done}
+                          onChange={() => toggleCustomTodoDone(todo.id)}
+                        />
+                        Done
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.5"
+                        value={todo.hours}
+                        onChange={(event) =>
+                          updateCustomTodoHours(todo.id, event.target.value)
+                        }
+                        className="h-7 w-20 rounded-md border border-slate-200 px-2 text-xs"
                       />
-                    ))}
-                  </ul>
-                </SortableContext>
-              </DndContext>
-            )}
+                      <button
+                        type="button"
+                        onClick={() => removeCustomTodo(todo.id)}
+                        className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-100"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        Delete
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+
+            {customTodos.length === 0 ? (
+              <p className="mt-2 rounded-md border border-dashed border-slate-300 p-3 text-sm text-slate-600">
+                Add items to plan your day. This list is personal and separate from the work queue.
+              </p>
+            ) : null}
           </section>
         </aside>
       </div>

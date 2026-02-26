@@ -1,39 +1,39 @@
-export type MarketingProjectPriority = "High" | "Medium" | "Low";
+﻿export type DevelopmentProjectPriority = "High" | "Medium" | "Low";
 
-export const MARKETING_PROJECT_PRIORITY_OPTIONS: MarketingProjectPriority[] = [
+export const DEVELOPMENT_PROJECT_PRIORITY_OPTIONS: DevelopmentProjectPriority[] = [
   "High",
   "Medium",
   "Low",
 ];
 
-export type MarketingProject = {
+export type DevelopmentProject = {
   id: string;
   name: string;
   startDate: string;
   deadline: string;
-  priority: MarketingProjectPriority;
+  priority: DevelopmentProjectPriority;
   tags: string[];
   isCompleted: boolean;
 };
 
-export const MARKETING_PROJECTS_STORAGE_KEY = "internal-system-marketing-projects";
-export const MARKETING_TAGS_STORAGE_KEY = "internal-system-marketing-tags";
-const MARKETING_PROJECTS_UPDATED_EVENT = "internal-system-marketing-projects-updated";
-const MARKETING_TAGS_UPDATED_EVENT = "internal-system-marketing-tags-updated";
+export const DEVELOPMENT_PROJECTS_STORAGE_KEY = "internal-system-development-projects";
+export const DEVELOPMENT_TAGS_STORAGE_KEY = "internal-system-development-tags";
+const DEVELOPMENT_PROJECTS_UPDATED_EVENT = "internal-system-development-projects-updated";
+const DEVELOPMENT_TAGS_UPDATED_EVENT = "internal-system-development-tags-updated";
 
-export const DEFAULT_MARKETING_TAGS = [
-  "Social Media",
-  "Paid Ads",
-  "Content",
-  "Branding",
-  "SEO",
-  "Email",
-  "Influencer",
-  "Analytics",
-  "Funnel",
-  "Strategy",
-  "Launch",
-  "Website",
+export const DEFAULT_DEVELOPMENT_TAGS = [
+  "Backend",
+  "Frontend",
+  "API",
+  "Database",
+  "DevOps",
+  "QA",
+  "Security",
+  "Performance",
+  "Refactor",
+  "Bugfix",
+  "Architecture",
+  "Mobile",
 ];
 
 function normalizeTags(tags: string[]): string[] {
@@ -58,7 +58,7 @@ function parseProjectTags(value: unknown): string[] {
   return normalizeTags(stringTags);
 }
 
-function isMarketingProjectPriority(value: unknown): value is MarketingProjectPriority {
+function isDevelopmentProjectPriority(value: unknown): value is DevelopmentProjectPriority {
   return (
     value === "High" ||
     value === "Medium" ||
@@ -66,12 +66,12 @@ function isMarketingProjectPriority(value: unknown): value is MarketingProjectPr
   );
 }
 
-function toMarketingProject(value: unknown): MarketingProject | null {
+function toDevelopmentProject(value: unknown): DevelopmentProject | null {
   if (!value || typeof value !== "object") {
     return null;
   }
 
-  const project = value as Partial<MarketingProject> & {
+  const project = value as Partial<DevelopmentProject> & {
     tags?: unknown;
     priority?: unknown;
   };
@@ -91,7 +91,7 @@ function toMarketingProject(value: unknown): MarketingProject | null {
       name: project.name,
       startDate: project.startDate,
       deadline: project.deadline,
-      priority: isMarketingProjectPriority(project.priority)
+      priority: isDevelopmentProjectPriority(project.priority)
         ? project.priority
         : "Medium",
       tags: parseProjectTags(project.tags),
@@ -100,7 +100,7 @@ function toMarketingProject(value: unknown): MarketingProject | null {
   );
 }
 
-export function parseMarketingProjects(rawProjects: string | null): MarketingProject[] {
+export function parseDevelopmentProjects(rawProjects: string | null): DevelopmentProject[] {
   if (!rawProjects) {
     return [];
   }
@@ -112,14 +112,14 @@ export function parseMarketingProjects(rawProjects: string | null): MarketingPro
     }
 
     return parsed
-      .map((project) => toMarketingProject(project))
-      .filter((project): project is MarketingProject => project !== null);
+      .map((project) => toDevelopmentProject(project))
+      .filter((project): project is DevelopmentProject => project !== null);
   } catch {
     return [];
   }
 }
 
-export function parseMarketingTags(rawTags: string | null): string[] {
+export function parseDevelopmentTags(rawTags: string | null): string[] {
   if (!rawTags) {
     return [];
   }
@@ -137,81 +137,81 @@ export function parseMarketingTags(rawTags: string | null): string[] {
   }
 }
 
-export function getMarketingProjectsSnapshot(): string | null {
+export function getDevelopmentProjectsSnapshot(): string | null {
   if (typeof window === "undefined") {
     return null;
   }
 
-  return window.localStorage.getItem(MARKETING_PROJECTS_STORAGE_KEY);
+  return window.localStorage.getItem(DEVELOPMENT_PROJECTS_STORAGE_KEY);
 }
 
-export function getMarketingProjectsServerSnapshot(): string | null {
+export function getDevelopmentProjectsServerSnapshot(): string | null {
   return null;
 }
 
-export function getMarketingTagsSnapshot(): string | null {
+export function getDevelopmentTagsSnapshot(): string | null {
   if (typeof window === "undefined") {
     return null;
   }
 
-  return window.localStorage.getItem(MARKETING_TAGS_STORAGE_KEY);
+  return window.localStorage.getItem(DEVELOPMENT_TAGS_STORAGE_KEY);
 }
 
-export function getMarketingTagsServerSnapshot(): string | null {
+export function getDevelopmentTagsServerSnapshot(): string | null {
   return null;
 }
 
-export function readMarketingProjects(): MarketingProject[] {
-  const rawProjects = getMarketingProjectsSnapshot();
-  const projects = parseMarketingProjects(rawProjects);
+export function readDevelopmentProjects(): DevelopmentProject[] {
+  const rawProjects = getDevelopmentProjectsSnapshot();
+  const projects = parseDevelopmentProjects(rawProjects);
 
   if (!projects.length && rawProjects && typeof window !== "undefined") {
-    window.localStorage.removeItem(MARKETING_PROJECTS_STORAGE_KEY);
+    window.localStorage.removeItem(DEVELOPMENT_PROJECTS_STORAGE_KEY);
   }
 
   return projects;
 }
 
-export function readMarketingTags(): string[] {
-  const rawTags = getMarketingTagsSnapshot();
-  const parsedTags = parseMarketingTags(rawTags);
+export function readDevelopmentTags(): string[] {
+  const rawTags = getDevelopmentTagsSnapshot();
+  const parsedTags = parseDevelopmentTags(rawTags);
 
   if (parsedTags.length > 0) {
     return parsedTags;
   }
 
   if (typeof window !== "undefined") {
-    writeMarketingTags(DEFAULT_MARKETING_TAGS);
+    writeDevelopmentTags(DEFAULT_DEVELOPMENT_TAGS);
   }
 
-  return [...DEFAULT_MARKETING_TAGS];
+  return [...DEFAULT_DEVELOPMENT_TAGS];
 }
 
-export function writeMarketingProjects(projects: MarketingProject[]): void {
+export function writeDevelopmentProjects(projects: DevelopmentProject[]): void {
   if (typeof window === "undefined") {
     return;
   }
 
   window.localStorage.setItem(
-    MARKETING_PROJECTS_STORAGE_KEY,
+    DEVELOPMENT_PROJECTS_STORAGE_KEY,
     JSON.stringify(projects)
   );
-  window.dispatchEvent(new Event(MARKETING_PROJECTS_UPDATED_EVENT));
+  window.dispatchEvent(new Event(DEVELOPMENT_PROJECTS_UPDATED_EVENT));
 }
 
-export function writeMarketingTags(tags: string[]): void {
+export function writeDevelopmentTags(tags: string[]): void {
   if (typeof window === "undefined") {
     return;
   }
 
   window.localStorage.setItem(
-    MARKETING_TAGS_STORAGE_KEY,
+    DEVELOPMENT_TAGS_STORAGE_KEY,
     JSON.stringify(normalizeTags(tags))
   );
-  window.dispatchEvent(new Event(MARKETING_TAGS_UPDATED_EVENT));
+  window.dispatchEvent(new Event(DEVELOPMENT_TAGS_UPDATED_EVENT));
 }
 
-export function subscribeToMarketingProjects(
+export function subscribeToDevelopmentProjects(
   onStoreChange: () => void
 ): () => void {
   if (typeof window === "undefined") {
@@ -220,15 +220,15 @@ export function subscribeToMarketingProjects(
 
   const handler = () => onStoreChange();
   window.addEventListener("storage", handler);
-  window.addEventListener(MARKETING_PROJECTS_UPDATED_EVENT, handler);
+  window.addEventListener(DEVELOPMENT_PROJECTS_UPDATED_EVENT, handler);
 
   return () => {
     window.removeEventListener("storage", handler);
-    window.removeEventListener(MARKETING_PROJECTS_UPDATED_EVENT, handler);
+    window.removeEventListener(DEVELOPMENT_PROJECTS_UPDATED_EVENT, handler);
   };
 }
 
-export function subscribeToMarketingTags(
+export function subscribeToDevelopmentTags(
   onStoreChange: () => void
 ): () => void {
   if (typeof window === "undefined") {
@@ -237,15 +237,15 @@ export function subscribeToMarketingTags(
 
   const handler = () => onStoreChange();
   window.addEventListener("storage", handler);
-  window.addEventListener(MARKETING_TAGS_UPDATED_EVENT, handler);
+  window.addEventListener(DEVELOPMENT_TAGS_UPDATED_EVENT, handler);
 
   return () => {
     window.removeEventListener("storage", handler);
-    window.removeEventListener(MARKETING_TAGS_UPDATED_EVENT, handler);
+    window.removeEventListener(DEVELOPMENT_TAGS_UPDATED_EVENT, handler);
   };
 }
 
-export function createMarketingProjectId(): string {
+export function createDevelopmentProjectId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID();
   }

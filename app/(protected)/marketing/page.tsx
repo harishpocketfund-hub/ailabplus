@@ -1,7 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { CalendarDays, Filter, Sparkles, Tag, X } from "lucide-react";
+import {
+  AlertTriangle,
+  CalendarDays,
+  CheckCircle2,
+  Filter,
+  Sparkles,
+  Tag,
+  X,
+} from "lucide-react";
 import {
   FormEvent,
   KeyboardEvent,
@@ -24,6 +32,8 @@ import {
   getMarketingTagsServerSnapshot,
   getMarketingTagsSnapshot,
   MarketingProject,
+  MARKETING_PROJECT_PRIORITY_OPTIONS,
+  MarketingProjectPriority,
   parseMarketingProjects,
   parseMarketingTags,
   subscribeToMarketingProjects,
@@ -31,6 +41,12 @@ import {
   writeMarketingProjects,
   writeMarketingTags,
 } from "@/lib/marketing-projects";
+import {
+  getMarketingTasksServerSnapshot,
+  getMarketingTasksSnapshot,
+  parseMarketingTasksByProject,
+  subscribeToMarketingTasks,
+} from "@/lib/marketing-tasks";
 import { readDemoUser } from "@/lib/demo-user";
 import {
   appendMarketingProjectCommitLogs,
@@ -47,11 +63,19 @@ type ProjectDeadlineFilter =
   | "Next 7 days"
   | "Next 30 days"
   | "No deadline";
+type ProjectTypeFilter =
+  | "All"
+  | "Critical project"
+  | "Overdue project"
+  | "On track project";
+type ProjectPriorityFilter = "All" | MarketingProjectPriority;
 
 type MarketingProjectFilters = {
   search: string;
   deadline: ProjectDeadlineFilter;
   person: string;
+  type: ProjectTypeFilter;
+  priority: ProjectPriorityFilter;
   tags: string[];
 };
 
@@ -60,11 +84,33 @@ type ProjectUrgency = {
   label: string;
 };
 
+type ProjectHealth = {
+  totalTasks: number;
+  openTasks: number;
+  doneTasks: number;
+  overdueOpenTasks: number;
+  highPriorityOpenTasks: number;
+  overdueOpenRatio: number;
+  isCriticalOverdueLoad: boolean;
+};
+
 const createDefaultFilters = (): MarketingProjectFilters => ({
   search: "",
   deadline: "Any",
   person: "All",
+  type: "All",
+  priority: "All",
   tags: [],
+});
+
+const createDefaultProjectHealth = (): ProjectHealth => ({
+  totalTasks: 0,
+  openTasks: 0,
+  doneTasks: 0,
+  overdueOpenTasks: 0,
+  highPriorityOpenTasks: 0,
+  overdueOpenRatio: 0,
+  isCriticalOverdueLoad: false,
 });
 
 function toLocalIsoDate(date: Date): string {
@@ -106,6 +152,7 @@ function parseFilters(rawFilters: string | null): MarketingProjectFilters {
   try {
     const parsed = JSON.parse(rawFilters) as Partial<MarketingProjectFilters> & {
       status?: string;
+      risk?: string;
     };
 
     const deadlineOptions: ProjectDeadlineFilter[] = [
@@ -116,6 +163,16 @@ function parseFilters(rawFilters: string | null): MarketingProjectFilters {
       "Next 30 days",
       "No deadline",
     ];
+    const typeOptions: ProjectTypeFilter[] = [
+      "All",
+      "Critical project",
+      "Overdue project",
+      "On track project",
+    ];
+    const priorityOptions: ProjectPriorityFilter[] = [
+      "All",
+      ...MARKETING_PROJECT_PRIORITY_OPTIONS,
+    ];
 
     const mappedLegacyDeadline: ProjectDeadlineFilter =
       parsed.status === "Overdue"
@@ -125,6 +182,12 @@ function parseFilters(rawFilters: string | null): MarketingProjectFilters {
           : parsed.status === "Due soon"
             ? "Next 7 days"
             : "Any";
+    const mappedLegacyType: ProjectTypeFilter =
+      parsed.risk === "Critical" || parsed.risk === "High priority tasks"
+        ? "Critical project"
+        : parsed.risk === "Overdue tasks"
+          ? "Overdue project"
+          : "All";
 
     return {
       search: typeof parsed.search === "string" ? parsed.search : "",
@@ -132,6 +195,12 @@ function parseFilters(rawFilters: string | null): MarketingProjectFilters {
         ? (parsed.deadline as ProjectDeadlineFilter)
         : mappedLegacyDeadline,
       person: typeof parsed.person === "string" ? parsed.person : "All",
+      type: typeOptions.includes(parsed.type as ProjectTypeFilter)
+        ? (parsed.type as ProjectTypeFilter)
+        : mappedLegacyType,
+      priority: priorityOptions.includes(parsed.priority as ProjectPriorityFilter)
+        ? (parsed.priority as ProjectPriorityFilter)
+        : "All",
       tags: Array.isArray(parsed.tags)
         ? parsed.tags.filter((tag): tag is string => typeof tag === "string")
         : [],
@@ -162,6 +231,16 @@ function getProjectUrgency(project: MarketingProject, today: string): ProjectUrg
   }
 
   return { status: "On track", label: "On track" };
+}
+
+function getProjectPriorityBadgeClasses(priority: MarketingProjectPriority): string {
+  if (priority === "High") {
+    return "border-red-300 bg-red-100 text-red-700";
+  }
+  if (priority === "Low") {
+    return "border-green-300 bg-green-100 text-green-700";
+  }
+  return "border-yellow-300 bg-yellow-100 text-yellow-800";
 }
 
 function matchesDeadlineFilter(
@@ -214,10 +293,16 @@ export default function MarketingPage() {
     getMarketingMembersSnapshot,
     getMarketingMembersServerSnapshot
   );
+  const rawTasksByProject = useSyncExternalStore(
+    subscribeToMarketingTasks,
+    getMarketingTasksSnapshot,
+    getMarketingTasksServerSnapshot
+  );
 
   const projects = parseMarketingProjects(rawProjects);
   const storageTags = parseMarketingTags(rawTags);
   const membersByProject = parseMarketingMembersByProject(rawMembersByProject);
+  const tasksByProject = parseMarketingTasksByProject(rawTasksByProject);
 
   const today = toLocalIsoDate(new Date());
   const todayPlusWeek = addDays(today, 7);
@@ -229,6 +314,8 @@ export default function MarketingPage() {
   const [projectName, setProjectName] = useState("");
   const [startDate, setStartDate] = useState("");
   const [deadline, setDeadline] = useState("");
+  const [projectPriority, setProjectPriority] =
+    useState<MarketingProjectPriority>("Medium");
   const [selectedProjectTags, setSelectedProjectTags] = useState<string[]>([]);
   const [newTagInput, setNewTagInput] = useState("");
   const [dateError, setDateError] = useState("");
@@ -279,6 +366,49 @@ export default function MarketingPage() {
     return [...uniquePeople].sort((a, b) => a.localeCompare(b));
   }, [membersByProject]);
 
+  const projectHealthById = useMemo(() => {
+    const healthById = new Map<string, ProjectHealth>();
+
+    projects.forEach((project) => {
+      const projectTasks = tasksByProject[project.id] ?? [];
+      let openTasks = 0;
+      let doneTasks = 0;
+      let overdueOpenTasks = 0;
+      let highPriorityOpenTasks = 0;
+
+      projectTasks.forEach((task) => {
+        const isDone = task.status === "Done";
+        if (isDone) {
+          doneTasks += 1;
+          return;
+        }
+
+        openTasks += 1;
+        if (task.dueDate && task.dueDate < today) {
+          overdueOpenTasks += 1;
+        }
+        if (task.priority === "High") {
+          highPriorityOpenTasks += 1;
+        }
+      });
+
+      const overdueOpenRatio = openTasks > 0 ? overdueOpenTasks / openTasks : 0;
+      const isCriticalOverdueLoad = openTasks > 0 && overdueOpenTasks * 2 >= openTasks;
+
+      healthById.set(project.id, {
+        totalTasks: projectTasks.length,
+        openTasks,
+        doneTasks,
+        overdueOpenTasks,
+        highPriorityOpenTasks,
+        overdueOpenRatio,
+        isCriticalOverdueLoad,
+      });
+    });
+
+    return healthById;
+  }, [projects, tasksByProject, today]);
+
   const validateDateRange = (projectStartDate: string, projectDeadline: string): string => {
     if (!projectStartDate || !projectDeadline) {
       return "";
@@ -293,6 +423,7 @@ export default function MarketingPage() {
     setProjectName("");
     setStartDate("");
     setDeadline("");
+    setProjectPriority("Medium");
     setSelectedProjectTags([]);
     setNewTagInput("");
     setDateError("");
@@ -313,6 +444,7 @@ export default function MarketingPage() {
       setProjectName("");
       setStartDate("");
       setDeadline("");
+      setProjectPriority("Medium");
       setSelectedProjectTags([]);
       setNewTagInput("");
       setDateError("");
@@ -330,6 +462,7 @@ export default function MarketingPage() {
     setProjectName("");
     setStartDate("");
     setDeadline("");
+    setProjectPriority("Medium");
     setSelectedProjectTags([]);
     setDateError("");
     setNewTagInput("");
@@ -341,19 +474,10 @@ export default function MarketingPage() {
     setProjectName(project.name);
     setStartDate(project.startDate);
     setDeadline(project.deadline);
+    setProjectPriority(project.priority);
     setSelectedProjectTags(project.tags);
     setDateError("");
     setNewTagInput("");
-  };
-
-  const setQuickDeadline = (daysFromStart: number) => {
-    const baselineStartDate = startDate || today;
-    const nextDeadline = addDays(baselineStartDate, daysFromStart);
-    if (!startDate) {
-      setStartDate(baselineStartDate);
-    }
-    setDeadline(nextDeadline);
-    setDateError(validateDateRange(baselineStartDate, nextDeadline));
   };
 
   const onSubmitProject = (event: FormEvent<HTMLFormElement>) => {
@@ -375,6 +499,7 @@ export default function MarketingPage() {
           name: trimmedProjectName,
           startDate,
           deadline,
+          priority: projectPriority,
           tags: normalizeTags(selectedProjectTags),
           isCompleted: false,
         },
@@ -391,6 +516,7 @@ export default function MarketingPage() {
             name: trimmedProjectName,
             startDate,
             deadline,
+            priority: projectPriority,
             tags: normalizeTags(selectedProjectTags),
           }
         : project
@@ -443,6 +569,20 @@ export default function MarketingPage() {
               field: "deadline" as const,
               fromValue: existingProject.deadline,
               toValue: deadline,
+              changedAtIso,
+              changedAtIndia,
+            }
+          : null,
+        existingProject.priority !== projectPriority
+          ? {
+              projectId: existingProject.id,
+              projectName: trimmedProjectName,
+              changedBy: actorName,
+              scope: "project" as const,
+              action: "updated",
+              field: "priority",
+              fromValue: existingProject.priority,
+              toValue: projectPriority,
               changedAtIso,
               changedAtIndia,
             }
@@ -523,8 +663,7 @@ export default function MarketingPage() {
 
   const filteredProjects = useMemo(() => {
     const searchQuery = filters.search.trim().toLowerCase();
-
-    return projects.filter((project) => {
+    const matchingProjects = projects.filter((project) => {
       if (searchQuery && !project.name.toLowerCase().includes(searchQuery)) {
         return false;
       }
@@ -548,6 +687,27 @@ export default function MarketingPage() {
         }
       }
 
+      const projectHealth =
+        projectHealthById.get(project.id) ?? createDefaultProjectHealth();
+      const isOverdueProject =
+        !project.isCompleted && Boolean(project.deadline) && project.deadline < today;
+      const isOnTrackProject =
+        !project.isCompleted && (!project.deadline || project.deadline >= today);
+
+      if (filters.type === "Critical project" && !projectHealth.isCriticalOverdueLoad) {
+        return false;
+      }
+      if (filters.type === "Overdue project" && !isOverdueProject) {
+        return false;
+      }
+      if (filters.type === "On track project" && !isOnTrackProject) {
+        return false;
+      }
+
+      if (filters.priority !== "All" && project.priority !== filters.priority) {
+        return false;
+      }
+
       if (
         filters.tags.length > 0 &&
         !project.tags.some((projectTag) => filters.tags.includes(projectTag))
@@ -557,12 +717,41 @@ export default function MarketingPage() {
 
       return true;
     });
+
+    return [...matchingProjects].sort((firstProject, secondProject) => {
+      const firstHealth =
+        projectHealthById.get(firstProject.id) ?? createDefaultProjectHealth();
+      const secondHealth =
+        projectHealthById.get(secondProject.id) ?? createDefaultProjectHealth();
+      if (firstHealth.isCriticalOverdueLoad !== secondHealth.isCriticalOverdueLoad) {
+        return firstHealth.isCriticalOverdueLoad ? -1 : 1;
+      }
+      if (firstHealth.overdueOpenRatio !== secondHealth.overdueOpenRatio) {
+        return secondHealth.overdueOpenRatio - firstHealth.overdueOpenRatio;
+      }
+      if (firstHealth.overdueOpenTasks !== secondHealth.overdueOpenTasks) {
+        return secondHealth.overdueOpenTasks - firstHealth.overdueOpenTasks;
+      }
+      if (firstProject.deadline && secondProject.deadline) {
+        return firstProject.deadline.localeCompare(secondProject.deadline);
+      }
+      if (firstProject.deadline) {
+        return -1;
+      }
+      if (secondProject.deadline) {
+        return 1;
+      }
+      return firstProject.name.localeCompare(secondProject.name);
+    });
   }, [
     filters.deadline,
     filters.person,
+    filters.priority,
+    filters.type,
     filters.search,
     filters.tags,
     membersByProject,
+    projectHealthById,
     projects,
     today,
     todayPlus30,
@@ -576,6 +765,12 @@ export default function MarketingPage() {
       }
       return project.deadline < today;
     }).length;
+    const onTrackCount = projects.filter((project) => {
+      if (project.isCompleted) {
+        return false;
+      }
+      return !project.deadline || project.deadline >= today;
+    }).length;
 
     const dueThisWeekCount = projects.filter((project) => {
       if (project.isCompleted || !project.deadline) {
@@ -584,12 +779,35 @@ export default function MarketingPage() {
       return project.deadline >= today && project.deadline <= todayPlusWeek;
     }).length;
 
+    const criticalProjects = projects.filter((project) => {
+      const health = projectHealthById.get(project.id) ?? createDefaultProjectHealth();
+      return health.isCriticalOverdueLoad;
+    }).length;
+    const completionRate =
+      projects.length === 0
+        ? 0
+        : Math.round(
+            (projects.reduce((sum, project) => {
+              const health =
+                projectHealthById.get(project.id) ?? createDefaultProjectHealth();
+              if (health.totalTasks === 0) {
+                return sum;
+              }
+              return sum + health.doneTasks / health.totalTasks;
+            }, 0) /
+              projects.length) *
+              100
+          );
+
     return {
       total: projects.length,
       overdue: overdueCount,
+      onTrack: onTrackCount,
       dueThisWeek: dueThisWeekCount,
+      criticalProjects,
+      completionRate,
     };
-  }, [projects, today, todayPlusWeek]);
+  }, [projectHealthById, projects, today, todayPlusWeek]);
 
   const projectFormUrgency = useMemo<ProjectUrgency>(() => {
     if (!deadline) {
@@ -602,12 +820,13 @@ export default function MarketingPage() {
         name: projectName,
         startDate,
         deadline,
+        priority: projectPriority,
         tags: selectedProjectTags,
         isCompleted: false,
       },
       today
     );
-  }, [deadline, projectName, selectedProjectTags, startDate, today]);
+  }, [deadline, projectName, projectPriority, selectedProjectTags, startDate, today]);
 
   const projectFormDurationDays = useMemo(() => {
     if (!startDate || !deadline || deadline < startDate) {
@@ -618,30 +837,62 @@ export default function MarketingPage() {
   }, [deadline, startDate]);
 
   return (
-    <section className="w-full max-w-6xl space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <h1 className="text-2xl font-semibold">Marketing</h1>
-        <button
-          type="button"
-          onClick={onCreateOpen}
-          className="rounded-md bg-black px-4 py-2 text-sm font-medium text-white hover:opacity-90"
-        >
-          + New Project
-        </button>
-      </div>
+    <section className="w-full max-w-7xl space-y-4">
+      <div className="rounded-2xl border border-black/10 bg-gradient-to-b from-white to-black/[0.02] p-5 shadow-sm">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-semibold tracking-tight">Marketing Portfolio</h1>
+            <p className="mt-1 text-sm text-black/60">
+              Prioritize risk first. {stats.criticalProjects} critical project
+              {stats.criticalProjects === 1 ? "" : "s"} need intervention.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={onCreateOpen}
+              className="rounded-md bg-black px-4 py-2 text-sm font-medium text-white hover:opacity-90"
+            >
+              + New Project
+            </button>
+          </div>
+        </div>
 
-      <div className="grid gap-3 sm:grid-cols-3">
-        <div className="rounded-lg border border-black/10 bg-black/[0.02] p-3">
-          <p className="text-xs text-black/60">Total projects</p>
-          <p className="mt-1 text-2xl font-semibold">{stats.total}</p>
-        </div>
-        <div className="rounded-lg border border-red-200 bg-red-50 p-3">
-          <p className="text-xs text-red-700">Overdue projects</p>
-          <p className="mt-1 text-2xl font-semibold text-red-800">{stats.overdue}</p>
-        </div>
-        <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-3">
-          <p className="text-xs text-yellow-700">Due this week</p>
-          <p className="mt-1 text-2xl font-semibold text-yellow-800">{stats.dueThisWeek}</p>
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+          <div className="rounded-lg border border-black/10 bg-white px-3 py-2">
+            <p className="text-xs text-black/55">Total projects</p>
+            <p className="mt-1 text-2xl font-semibold">{stats.total}</p>
+          </div>
+          <div className="rounded-lg border border-red-200 bg-red-50/80 px-3 py-2">
+            <p className="inline-flex items-center gap-1 text-xs text-red-700">
+              <AlertTriangle className="h-3.5 w-3.5" />
+              Critical projects
+            </p>
+            <p className="mt-1 text-2xl font-semibold text-red-800">
+              {stats.criticalProjects}
+            </p>
+          </div>
+          <div className="rounded-lg border border-yellow-200 bg-yellow-50/80 px-3 py-2">
+            <p className="text-xs text-yellow-700">Overdue projects</p>
+            <p className="mt-1 text-2xl font-semibold text-yellow-800">{stats.overdue}</p>
+          </div>
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50/80 px-3 py-2">
+            <p className="text-xs text-emerald-700">On track projects</p>
+            <p className="mt-1 text-2xl font-semibold text-emerald-800">{stats.onTrack}</p>
+          </div>
+          <div className="rounded-lg border border-green-200 bg-green-50/70 px-3 py-2">
+            <p className="inline-flex items-center gap-1 text-xs text-green-700">
+              <CheckCircle2 className="h-3.5 w-3.5" />
+              Completion rate
+            </p>
+            <p className="mt-1 text-2xl font-semibold text-green-800">
+              {stats.completionRate}%
+            </p>
+          </div>
+          <div className="rounded-lg border border-yellow-200 bg-yellow-50/80 px-3 py-2">
+            <p className="text-xs text-yellow-700">Due this week</p>
+            <p className="mt-1 text-2xl font-semibold text-yellow-800">{stats.dueThisWeek}</p>
+          </div>
         </div>
       </div>
 
@@ -693,7 +944,7 @@ export default function MarketingPage() {
                   />
                 </label>
 
-                <div className="grid gap-4 sm:grid-cols-2">
+                <div className="grid gap-4 sm:grid-cols-3">
                   <label className="block text-sm">
                     <span className="font-medium">Start Date</span>
                     <input
@@ -723,40 +974,23 @@ export default function MarketingPage() {
                       required
                     />
                   </label>
-                </div>
 
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setStartDate(today);
-                      setDateError(validateDateRange(today, deadline));
-                    }}
-                    className="rounded-full border border-black/20 px-3 py-1 text-xs hover:bg-black/5"
-                  >
-                    Start today
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setQuickDeadline(7)}
-                    className="rounded-full border border-black/20 px-3 py-1 text-xs hover:bg-black/5"
-                  >
-                    Deadline +7d
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setQuickDeadline(14)}
-                    className="rounded-full border border-black/20 px-3 py-1 text-xs hover:bg-black/5"
-                  >
-                    Deadline +14d
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setQuickDeadline(30)}
-                    className="rounded-full border border-black/20 px-3 py-1 text-xs hover:bg-black/5"
-                  >
-                    Deadline +30d
-                  </button>
+                  <label className="block text-sm">
+                    <span className="font-medium">Priority</span>
+                    <select
+                      value={projectPriority}
+                      onChange={(event) =>
+                        setProjectPriority(event.target.value as MarketingProjectPriority)
+                      }
+                      className="mt-1.5 block h-10 w-full rounded-md border border-black/20 px-3"
+                    >
+                      {MARKETING_PROJECT_PRIORITY_OPTIONS.map((priority) => (
+                        <option key={priority} value={priority}>
+                          {priority}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                 </div>
 
                 {dateError ? <p className="text-xs text-red-600">{dateError}</p> : null}
@@ -805,6 +1039,7 @@ export default function MarketingPage() {
                 <div className="space-y-1 text-sm text-black/70">
                   <p>Start: {startDate || "-"}</p>
                   <p>Deadline: {deadline || "-"}</p>
+                  <p>Priority: {projectPriority}</p>
                   <p>
                     Duration:{" "}
                     {projectFormDurationDays !== null
@@ -869,83 +1104,154 @@ export default function MarketingPage() {
         </div>
       ) : null}
 
-      <div className="rounded-xl border border-black/10 px-3 py-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <input
-            type="text"
-            value={filters.search}
-            onChange={(event) =>
-              setFilters((currentFilters) => ({
-                ...currentFilters,
-                search: event.target.value,
-              }))
-            }
-            placeholder="Search projects..."
-            className="h-9 w-52 rounded-md border border-black/20 px-3 text-sm"
-          />
+      <div className="rounded-xl border border-black/10 bg-white p-3 shadow-sm">
+        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
+          <label className="block text-xs font-medium text-black/60 xl:col-span-2">
+            Search
+            <input
+              type="text"
+              value={filters.search}
+              onChange={(event) =>
+                setFilters((currentFilters) => ({
+                  ...currentFilters,
+                  search: event.target.value,
+                }))
+              }
+              placeholder="Project name"
+              className="mt-1 h-9 w-full rounded-md border border-black/20 px-3 text-sm"
+            />
+          </label>
 
-          <select
-            value={filters.deadline}
-            onChange={(event) =>
-              setFilters((currentFilters) => ({
-                ...currentFilters,
-                deadline: event.target.value as ProjectDeadlineFilter,
-              }))
-            }
-            className="h-9 w-36 rounded-md border border-black/20 px-2 text-sm"
-          >
-            <option value="Any">Any</option>
-            <option value="Overdue">Overdue</option>
-            <option value="Due today">Due today</option>
-            <option value="Next 7 days">Next 7 days</option>
-            <option value="Next 30 days">Next 30 days</option>
-            <option value="No deadline">No deadline</option>
-          </select>
+          <label className="block text-xs font-medium text-black/60">
+            Deadline
+            <select
+              value={filters.deadline}
+              onChange={(event) =>
+                setFilters((currentFilters) => ({
+                  ...currentFilters,
+                  deadline: event.target.value as ProjectDeadlineFilter,
+                }))
+              }
+              className="mt-1 h-9 w-full rounded-md border border-black/20 bg-white px-2 text-sm"
+            >
+              <option value="Any">Any</option>
+              <option value="Overdue">Overdue</option>
+              <option value="Due today">Due today</option>
+              <option value="Next 7 days">Next 7 days</option>
+              <option value="Next 30 days">Next 30 days</option>
+              <option value="No deadline">No deadline</option>
+            </select>
+          </label>
 
-          <select
-            value={filters.person}
-            onChange={(event) =>
-              setFilters((currentFilters) => ({
-                ...currentFilters,
-                person: event.target.value,
-              }))
-            }
-            className="h-9 w-40 rounded-md border border-black/20 px-2 text-sm"
-          >
-            <option value="All">All</option>
-            {peopleOptions.map((person) => (
-              <option key={`person-${person}`} value={person}>
-                {person}
-              </option>
-            ))}
-          </select>
-
-          <details className="relative">
-            <summary className="inline-flex h-9 list-none cursor-pointer items-center gap-2 rounded-md border border-black/20 px-3 text-sm">
-              <Filter className="h-3.5 w-3.5" />
-              Tags {filters.tags.length > 0 ? `(${filters.tags.length})` : ""}
-            </summary>
-            <div className="absolute z-20 mt-1 max-h-56 w-56 overflow-auto rounded-md border border-black/15 bg-white p-2 shadow-lg">
-              {allTagOptions.map((tag) => (
-                <label key={`filter-${tag}`} className="flex items-center gap-2 py-1 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={filters.tags.includes(tag)}
-                    onChange={() => onToggleFilterTag(tag)}
-                  />
-                  {tag}
-                </label>
+          <label className="block text-xs font-medium text-black/60">
+            People
+            <select
+              value={filters.person}
+              onChange={(event) =>
+                setFilters((currentFilters) => ({
+                  ...currentFilters,
+                  person: event.target.value,
+                }))
+              }
+              className="mt-1 h-9 w-full rounded-md border border-black/20 bg-white px-2 text-sm"
+            >
+              <option value="All">All</option>
+              {peopleOptions.map((person) => (
+                <option key={`person-${person}`} value={person}>
+                  {person}
+                </option>
               ))}
-            </div>
-          </details>
+            </select>
+          </label>
 
-          <button
-            type="button"
-            onClick={() => setFilters(createDefaultFilters())}
-            className="ml-auto h-9 rounded-md border border-black/20 px-3 text-sm hover:bg-black/5"
-          >
-            Clear
-          </button>
+          <label className="block text-xs font-medium text-black/60">
+            Type
+            <select
+              value={filters.type}
+              onChange={(event) =>
+                setFilters((currentFilters) => ({
+                  ...currentFilters,
+                  type: event.target.value as ProjectTypeFilter,
+                }))
+              }
+              className="mt-1 h-9 w-full rounded-md border border-black/20 bg-white px-2 text-sm"
+            >
+              <option value="All">All</option>
+              <option value="Critical project">Critical project</option>
+              <option value="Overdue project">Overdue project</option>
+              <option value="On track project">On track project</option>
+            </select>
+          </label>
+
+          <label className="block text-xs font-medium text-black/60">
+            Priority
+            <select
+              value={filters.priority}
+              onChange={(event) =>
+                setFilters((currentFilters) => ({
+                  ...currentFilters,
+                  priority: event.target.value as ProjectPriorityFilter,
+                }))
+              }
+              className="mt-1 h-9 w-full rounded-md border border-black/20 bg-white px-2 text-sm"
+            >
+              <option value="All">All</option>
+              {MARKETING_PROJECT_PRIORITY_OPTIONS.map((priority) => (
+                <option key={`filter-priority-${priority}`} value={priority}>
+                  {priority}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <div className="xl:col-span-6">
+            <p className="text-xs font-medium text-black/60">Tags</p>
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <details className="relative w-full max-w-[220px]">
+                <summary className="inline-flex h-9 w-full list-none cursor-pointer items-center justify-between rounded-md border border-black/20 bg-white px-3 text-sm">
+                  <span className="inline-flex items-center gap-2">
+                    <Filter className="h-3.5 w-3.5" />
+                    Select tags
+                  </span>
+                  <span className="text-xs text-black/60">
+                    {filters.tags.length > 0 ? `${filters.tags.length} selected` : "All"}
+                  </span>
+                </summary>
+                <div className="absolute z-20 mt-1 max-h-56 w-full overflow-auto rounded-md border border-black/15 bg-white p-2 shadow-lg">
+                  {allTagOptions.map((tag) => (
+                    <label key={`filter-${tag}`} className="flex items-center gap-2 py-1 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={filters.tags.includes(tag)}
+                        onChange={() => onToggleFilterTag(tag)}
+                      />
+                      {tag}
+                    </label>
+                  ))}
+                </div>
+              </details>
+              <button
+                type="button"
+                onClick={() => setFilters(createDefaultFilters())}
+                className="ml-auto h-9 shrink-0 rounded-md border border-black/20 px-3 text-xs font-medium hover:bg-black/5"
+              >
+                Clear filters
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          {filters.tags.length > 0
+            ? filters.tags.map((tag) => (
+                <span
+                  key={`active-filter-${tag}`}
+                  className="inline-flex rounded-full border border-black/15 bg-black/[0.03] px-2 py-0.5 text-xs text-black/70"
+                >
+                  {tag}
+                </span>
+              ))
+            : null}
         </div>
       </div>
 
@@ -958,7 +1264,19 @@ export default function MarketingPage() {
               const urgency = getProjectUrgency(project, today);
               const isCompleted = project.isCompleted;
               const hasDeadline = Boolean(project.deadline);
-              const cardClasses = isCompleted
+              const projectHealth =
+                projectHealthById.get(project.id) ?? createDefaultProjectHealth();
+              const completionPercent =
+                projectHealth.totalTasks > 0
+                  ? Math.round((projectHealth.doneTasks / projectHealth.totalTasks) * 100)
+                  : 0;
+              const hasCriticalTaskDebt =
+                !isCompleted && projectHealth.isCriticalOverdueLoad;
+              const overdueRatioPercent = Math.round(projectHealth.overdueOpenRatio * 100);
+              const teamSize = (membersByProject[project.id] ?? []).length;
+              const cardClasses = hasCriticalTaskDebt
+                ? "border-red-300 bg-red-50/75 ring-1 ring-red-200"
+                : isCompleted
                 ? "border-black/10 bg-white"
                 : !hasDeadline
                   ? "border-black/10 bg-white"
@@ -978,7 +1296,7 @@ export default function MarketingPage() {
                     className={`rounded-xl border p-4 transition hover:-translate-y-0.5 hover:shadow-md ${cardClasses}`}
                   >
                     <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div className="space-y-2">
+                      <div className="min-w-[240px] flex-1 space-y-2">
                         <p className="text-base font-semibold">{project.name}</p>
                         <div className="flex flex-wrap items-center gap-2 text-xs text-black/70">
                           <span className="inline-flex items-center gap-1 rounded-full border border-black/15 px-2 py-0.5">
@@ -987,6 +1305,13 @@ export default function MarketingPage() {
                           </span>
                           <span className="inline-flex items-center gap-1 rounded-full border border-black/15 px-2 py-0.5">
                             Deadline {project.deadline || "No deadline"}
+                          </span>
+                          <span
+                            className={`inline-flex rounded-full border px-2 py-0.5 ${getProjectPriorityBadgeClasses(
+                              project.priority
+                            )}`}
+                          >
+                            Priority {project.priority}
                           </span>
                           {!isCompleted ? (
                             <span
@@ -1005,6 +1330,42 @@ export default function MarketingPage() {
                               {urgency.label}
                             </span>
                           ) : null}
+                          {hasCriticalTaskDebt ? (
+                            <span className="inline-flex rounded-full border border-red-300 bg-red-100 px-2 py-0.5 text-red-700">
+                              Critical overdue load
+                            </span>
+                          ) : null}
+                        </div>
+
+                        <div className="rounded-lg border border-black/10 bg-white/70 p-2">
+                          <div className="flex items-center justify-between text-xs text-black/60">
+                            <span>Execution progress</span>
+                            <span>{completionPercent}%</span>
+                          </div>
+                          <div className="mt-2 h-1.5 rounded-full bg-black/10">
+                            <div
+                              className={`h-full rounded-full ${
+                                hasCriticalTaskDebt ? "bg-red-500" : "bg-black"
+                              }`}
+                              style={{
+                                width: `${Math.max(0, Math.min(100, completionPercent))}%`,
+                              }}
+                            />
+                          </div>
+                          <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-black/70">
+                            <span>{projectHealth.totalTasks} total tasks</span>
+                            <span>{projectHealth.openTasks} open</span>
+                            <span className="text-red-700">
+                              {projectHealth.overdueOpenTasks} overdue
+                            </span>
+                            <span>{projectHealth.highPriorityOpenTasks} high open</span>
+                            <span>{teamSize} team</span>
+                            {projectHealth.openTasks > 0 ? (
+                              <span className="font-medium">
+                                Overdue ratio {overdueRatioPercent}%
+                              </span>
+                            ) : null}
+                          </div>
                         </div>
 
                         {project.tags.length > 0 ? (
