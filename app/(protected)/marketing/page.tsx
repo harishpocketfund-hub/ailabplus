@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { CalendarDays, Filter, Tag } from "lucide-react";
+import { CalendarDays, Filter, Sparkles, Tag, X } from "lucide-react";
 import {
   FormEvent,
   KeyboardEvent,
@@ -300,6 +300,30 @@ export default function MarketingPage() {
     setEditingProjectId(null);
   };
 
+  useEffect(() => {
+    if (!isCreating) {
+      return;
+    }
+
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+
+      setProjectName("");
+      setStartDate("");
+      setDeadline("");
+      setSelectedProjectTags([]);
+      setNewTagInput("");
+      setDateError("");
+      setIsCreating(false);
+      setEditingProjectId(null);
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isCreating]);
+
   const onCreateOpen = () => {
     setIsCreating(true);
     setEditingProjectId(null);
@@ -320,6 +344,16 @@ export default function MarketingPage() {
     setSelectedProjectTags(project.tags);
     setDateError("");
     setNewTagInput("");
+  };
+
+  const setQuickDeadline = (daysFromStart: number) => {
+    const baselineStartDate = startDate || today;
+    const nextDeadline = addDays(baselineStartDate, daysFromStart);
+    if (!startDate) {
+      setStartDate(baselineStartDate);
+    }
+    setDeadline(nextDeadline);
+    setDateError(validateDateRange(baselineStartDate, nextDeadline));
   };
 
   const onSubmitProject = (event: FormEvent<HTMLFormElement>) => {
@@ -557,6 +591,32 @@ export default function MarketingPage() {
     };
   }, [projects, today, todayPlusWeek]);
 
+  const projectFormUrgency = useMemo<ProjectUrgency>(() => {
+    if (!deadline) {
+      return { status: "On track", label: "No deadline" };
+    }
+
+    return getProjectUrgency(
+      {
+        id: "preview",
+        name: projectName,
+        startDate,
+        deadline,
+        tags: selectedProjectTags,
+        isCompleted: false,
+      },
+      today
+    );
+  }, [deadline, projectName, selectedProjectTags, startDate, today]);
+
+  const projectFormDurationDays = useMemo(() => {
+    if (!startDate || !deadline || deadline < startDate) {
+      return null;
+    }
+
+    return getDaysDiff(startDate, deadline) + 1;
+  }, [deadline, startDate]);
+
   return (
     <section className="w-full max-w-6xl space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-4">
@@ -586,115 +646,227 @@ export default function MarketingPage() {
       </div>
 
       {isCreating ? (
-        <form
-          onSubmit={onSubmitProject}
-          className="rounded-xl border border-black/10 bg-white p-4 shadow-sm"
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4"
+          onClick={resetForm}
         >
-          <div className="grid gap-4 sm:grid-cols-2">
-            <label className="text-sm">
-              <span className="block">Project Name</span>
-              <input
-                type="text"
-                value={projectName}
-                onChange={(event) => setProjectName(event.target.value)}
-                className="mt-1 block w-full rounded-md border border-black/20 px-3 py-2"
-                required
-              />
-            </label>
-            <label className="text-sm">
-              <span className="block">Start Date</span>
-              <input
-                type="date"
-                value={startDate}
-                onChange={(event) => {
-                  const nextValue = event.target.value;
-                  setStartDate(nextValue);
-                  setDateError(validateDateRange(nextValue, deadline));
-                }}
-                className="mt-1 block h-10 w-full rounded-md border border-black/20 px-3 py-2"
-                required
-              />
-            </label>
-            <label className="text-sm sm:col-span-2">
-              <span className="block">Deadline</span>
-              <input
-                type="date"
-                value={deadline}
-                onChange={(event) => {
-                  const nextValue = event.target.value;
-                  setDeadline(nextValue);
-                  setDateError(validateDateRange(startDate, nextValue));
-                }}
-                className="mt-1 block h-10 w-full rounded-md border border-black/20 px-3 py-2 sm:max-w-xs"
-                required
-              />
-              {dateError ? <p className="mt-1 text-xs text-red-600">{dateError}</p> : null}
-            </label>
+          <form
+            onSubmit={onSubmitProject}
+            onClick={(event) => event.stopPropagation()}
+            className="w-full max-w-4xl overflow-hidden rounded-2xl border border-black/10 bg-white shadow-2xl"
+          >
+            <div className="flex items-start justify-between border-b border-black/10 bg-black/[0.02] px-5 py-4">
+              <div>
+                <p className="inline-flex items-center gap-1 text-xs font-medium text-black/60">
+                  <Sparkles className="h-3.5 w-3.5" />
+                  {editingProjectId
+                    ? "Update project setup"
+                    : "Create a new marketing initiative"}
+                </p>
+                <h2 className="mt-1 text-xl font-semibold">
+                  {editingProjectId ? "Edit Project" : "New Project"}
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={resetForm}
+                className="rounded-md border border-black/20 p-2 hover:bg-black/5"
+                aria-label="Close"
+                title="Close"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
 
-            <div className="text-sm sm:col-span-2">
-              Tags
-              <details className="relative mt-1">
-                <summary className="list-none cursor-pointer rounded-md border border-black/20 px-3 py-2">
-                  {selectedProjectTags.length > 0
-                    ? `${selectedProjectTags.length} selected`
-                    : "Select tags"}
-                </summary>
-                <div className="absolute z-20 mt-1 max-h-48 w-full overflow-auto rounded-md border border-black/15 bg-white p-2 shadow-lg">
-                  <div className="grid gap-1">
-                    {allTagOptions.map((tag) => (
-                      <label key={tag} className="inline-flex items-center gap-2 text-sm">
-                        <input
-                          type="checkbox"
-                          checked={selectedProjectTags.includes(tag)}
-                          onChange={() => onToggleProjectTag(tag)}
-                        />
-                        {tag}
-                      </label>
-                    ))}
+            <div className="grid gap-6 p-5 lg:grid-cols-[1.4fr_1fr]">
+              <div className="space-y-4">
+                <label className="block text-sm">
+                  <span className="font-medium">Project Name</span>
+                  <input
+                    type="text"
+                    value={projectName}
+                    onChange={(event) => setProjectName(event.target.value)}
+                    className="mt-1.5 block h-10 w-full rounded-md border border-black/20 px-3"
+                    placeholder="Campaign launch Q2"
+                    required
+                    autoFocus
+                  />
+                </label>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <label className="block text-sm">
+                    <span className="font-medium">Start Date</span>
+                    <input
+                      type="date"
+                      value={startDate}
+                      onChange={(event) => {
+                        const nextValue = event.target.value;
+                        setStartDate(nextValue);
+                        setDateError(validateDateRange(nextValue, deadline));
+                      }}
+                      className="mt-1.5 block h-10 w-full rounded-md border border-black/20 px-3"
+                      required
+                    />
+                  </label>
+
+                  <label className="block text-sm">
+                    <span className="font-medium">Deadline</span>
+                    <input
+                      type="date"
+                      value={deadline}
+                      onChange={(event) => {
+                        const nextValue = event.target.value;
+                        setDeadline(nextValue);
+                        setDateError(validateDateRange(startDate, nextValue));
+                      }}
+                      className="mt-1.5 block h-10 w-full rounded-md border border-black/20 px-3"
+                      required
+                    />
+                  </label>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setStartDate(today);
+                      setDateError(validateDateRange(today, deadline));
+                    }}
+                    className="rounded-full border border-black/20 px-3 py-1 text-xs hover:bg-black/5"
+                  >
+                    Start today
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setQuickDeadline(7)}
+                    className="rounded-full border border-black/20 px-3 py-1 text-xs hover:bg-black/5"
+                  >
+                    Deadline +7d
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setQuickDeadline(14)}
+                    className="rounded-full border border-black/20 px-3 py-1 text-xs hover:bg-black/5"
+                  >
+                    Deadline +14d
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setQuickDeadline(30)}
+                    className="rounded-full border border-black/20 px-3 py-1 text-xs hover:bg-black/5"
+                  >
+                    Deadline +30d
+                  </button>
+                </div>
+
+                {dateError ? <p className="text-xs text-red-600">{dateError}</p> : null}
+
+                <div className="rounded-lg border border-black/10 bg-black/[0.02] p-3">
+                  <p className="text-sm font-medium">Tags</p>
+                  <div className="mt-2 max-h-36 overflow-y-auto pr-1">
+                    <div className="flex flex-wrap gap-2">
+                      {allTagOptions.map((tag) => {
+                        const isSelected = selectedProjectTags.includes(tag);
+                        return (
+                          <button
+                            key={tag}
+                            type="button"
+                            onClick={() => onToggleProjectTag(tag)}
+                            className={`rounded-full border px-2.5 py-1 text-xs ${
+                              isSelected
+                                ? "border-black bg-black text-white"
+                                : "border-black/20 bg-white hover:bg-black/5"
+                            }`}
+                          >
+                            {tag}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <input
+                    type="text"
+                    value={newTagInput}
+                    onChange={(event) => setNewTagInput(event.target.value)}
+                    onKeyDown={onTagInputKeyDown}
+                    placeholder="Create tag and press Enter"
+                    className="mt-3 h-10 w-full rounded-md border border-black/20 px-3 text-sm"
+                  />
+                </div>
+              </div>
+
+              <aside className="space-y-3 rounded-lg border border-black/10 bg-black/[0.02] p-4">
+                <p className="text-xs font-medium uppercase tracking-wide text-black/55">
+                  Project Preview
+                </p>
+                <p className="text-lg font-semibold">
+                  {projectName.trim() || "Untitled project"}
+                </p>
+                <div className="space-y-1 text-sm text-black/70">
+                  <p>Start: {startDate || "-"}</p>
+                  <p>Deadline: {deadline || "-"}</p>
+                  <p>
+                    Duration:{" "}
+                    {projectFormDurationDays !== null
+                      ? `${projectFormDurationDays} day${
+                          projectFormDurationDays === 1 ? "" : "s"
+                        }`
+                      : "-"}
+                  </p>
+                </div>
+                <span
+                  className={`inline-flex rounded-full border px-2 py-1 text-xs ${
+                    projectFormUrgency.status === "Overdue"
+                      ? "border-red-300 bg-red-100 text-red-700"
+                      : projectFormUrgency.status === "Due today"
+                        ? "border-yellow-300 bg-yellow-100 text-yellow-800"
+                        : projectFormUrgency.status === "Due soon"
+                          ? "border-yellow-200 bg-yellow-50 text-yellow-800"
+                          : "border-emerald-200 bg-emerald-50 text-emerald-700"
+                  }`}
+                >
+                  {projectFormUrgency.label}
+                </span>
+                <div>
+                  <p className="text-xs font-medium text-black/60">Selected tags</p>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {selectedProjectTags.length === 0 ? (
+                      <span className="text-xs text-black/50">No tags selected</span>
+                    ) : (
+                      selectedProjectTags.map((tag) => (
+                        <span
+                          key={`preview-${tag}`}
+                          className="inline-flex items-center rounded-full border border-black/15 bg-white px-2 py-0.5 text-xs"
+                        >
+                          {tag}
+                        </span>
+                      ))
+                    )}
                   </div>
                 </div>
-              </details>
-
-              <input
-                type="text"
-                value={newTagInput}
-                onChange={(event) => setNewTagInput(event.target.value)}
-                onKeyDown={onTagInputKeyDown}
-                placeholder="Create new tag and press Enter"
-                className="mt-2 w-full rounded-md border border-black/20 px-3 py-2"
-              />
-
-              {selectedProjectTags.length > 0 ? (
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {selectedProjectTags.map((tag) => (
-                    <span
-                      key={`selected-${tag}`}
-                      className="inline-flex items-center rounded-full border border-black/15 bg-black/[0.03] px-2 py-0.5 text-xs"
-                    >
-                      {tag}
-                    </span>
-                  ))}
-                </div>
-              ) : null}
+              </aside>
             </div>
-          </div>
 
-          <div className="mt-4 flex gap-3">
-            <button
-              type="submit"
-              className="rounded-md bg-black px-4 py-2 text-sm font-medium text-white hover:opacity-90"
-            >
-              {editingProjectId ? "Save" : "Create"}
-            </button>
-            <button
-              type="button"
-              onClick={resetForm}
-              className="rounded-md border border-black/20 px-4 py-2 text-sm font-medium hover:bg-black/5"
-            >
-              Cancel
-            </button>
-          </div>
-        </form>
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-black/10 px-5 py-4">
+              <p className="text-xs text-black/55">Esc to close</p>
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={resetForm}
+                  className="rounded-md border border-black/20 px-4 py-2 text-sm font-medium hover:bg-black/5"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="rounded-md bg-black px-4 py-2 text-sm font-medium text-white hover:opacity-90"
+                >
+                  {editingProjectId ? "Save Changes" : "Create Project"}
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
       ) : null}
 
       <div className="rounded-xl border border-black/10 px-3 py-2">
