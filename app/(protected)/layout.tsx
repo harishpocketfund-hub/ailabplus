@@ -8,9 +8,8 @@ import {
   Megaphone,
   PanelLeft,
   Shield,
-  UserRound,
 } from "lucide-react";
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
   clearDemoUser,
@@ -18,7 +17,9 @@ import {
   getDemoUserSnapshot,
   parseDemoUser,
   subscribeToDemoUser,
+  writeDemoUser,
 } from "@/lib/demo-user";
+import { hydrateWorkstreamStateFromSupabase } from "@/lib/supabase/workstream-state-client";
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "internal-system-sidebar-collapsed";
 const SIDEBAR_COLLAPSED_UPDATED_EVENT = "internal-system-sidebar-collapsed-updated";
@@ -53,7 +54,6 @@ const subscribeToSidebarCollapsed = (
 };
 
 const sidebarLinks = [
-  { href: "/profile", label: "Profile", icon: UserRound },
   { href: "/my-work", label: "My Work", icon: LayoutDashboard },
   { href: "/marketing", label: "Marketing", icon: Megaphone },
   { href: "/development", label: "Development", icon: Code2 },
@@ -77,16 +77,77 @@ export default function ProtectedLayout({
   );
   const isSidebarCollapsed = sidebarCollapsedRaw === "true";
   const user = parseDemoUser(rawUser);
+  const hasHydratedWorkstreamStateRef = useRef(false);
 
   useEffect(() => {
-    if (!user) {
-      router.replace("/login");
+    if (user) {
+      return;
     }
+
+    let isCancelled = false;
+
+    const hydrateFromSession = async () => {
+      try {
+        const response = await fetch("/api/auth/me", {
+          method: "GET",
+          cache: "no-store",
+        });
+
+        if (!response.ok) {
+          if (!isCancelled) {
+            clearDemoUser();
+            router.replace("/login");
+          }
+          return;
+        }
+
+        const payload = (await response.json()) as {
+          user?: {
+            name: string;
+            title: string;
+            reportsTo: string;
+          };
+        };
+
+        if (!isCancelled && payload.user) {
+          writeDemoUser(payload.user);
+        }
+      } catch {
+        if (!isCancelled) {
+          clearDemoUser();
+          router.replace("/login");
+        }
+      }
+    };
+
+    void hydrateFromSession();
+
+    return () => {
+      isCancelled = true;
+    };
   }, [router, user]);
 
-  const onLogout = () => {
+  useEffect(() => {
+    if (!user || hasHydratedWorkstreamStateRef.current) {
+      return;
+    }
+
+    hasHydratedWorkstreamStateRef.current = true;
+    void hydrateWorkstreamStateFromSupabase();
+  }, [user]);
+
+  const onLogout = async () => {
+    try {
+      await fetch("/api/auth/logout", {
+        method: "POST",
+      });
+    } catch {
+      // Swallow network errors and still clear local state.
+    }
+
     clearDemoUser();
     router.replace("/login");
+    router.refresh();
   };
 
   const toggleSidebar = () => {
@@ -127,6 +188,25 @@ export default function ProtectedLayout({
             <PanelLeft className="h-4 w-4" />
           </button>
         </div>
+        <div className={`mb-3 ${isSidebarCollapsed ? "flex justify-center" : ""}`}>
+          {isSidebarCollapsed ? (
+            <div
+              title={user.name}
+              className="flex h-8 w-8 items-center justify-center rounded-md border border-black/20 bg-black/5 text-xs font-semibold text-black/70"
+            >
+              {user.name
+                .split(" ")
+                .map((part) => part.charAt(0).toUpperCase())
+                .slice(0, 2)
+                .join("")}
+            </div>
+          ) : (
+            <div className="w-full rounded-md border border-black/10 bg-black/[0.02] px-3 py-2">
+              <p className="truncate text-sm font-semibold text-black/85">{user.name}</p>
+              <p className="truncate text-xs text-black/60">{user.title}</p>
+            </div>
+          )}
+        </div>
         <nav className="flex flex-col gap-2">
           {sidebarLinks.map((item) => {
             const isActive =
@@ -156,7 +236,9 @@ export default function ProtectedLayout({
         </nav>
         <button
           type="button"
-          onClick={onLogout}
+          onClick={() => {
+            void onLogout();
+          }}
           title={isSidebarCollapsed ? "Logout" : undefined}
           className={`mt-6 rounded-md border border-black/20 px-3 py-2 text-sm font-medium hover:bg-black/5 ${
             isSidebarCollapsed

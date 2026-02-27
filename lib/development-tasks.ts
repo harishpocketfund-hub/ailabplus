@@ -1,4 +1,5 @@
-﻿export const DEVELOPMENT_TASKS_STORAGE_KEY = "internal-system-development-tasks";
+import { scheduleWorkstreamStateSync } from "@/lib/supabase/workstream-state-client";
+export const DEVELOPMENT_TASKS_STORAGE_KEY = "internal-system-development-tasks";
 const DEVELOPMENT_TASKS_UPDATED_EVENT = "internal-system-development-tasks-updated";
 
 export const TASK_STATUS_OPTIONS = [
@@ -322,6 +323,7 @@ export function writeDevelopmentTasksByProject(
     JSON.stringify(tasksByProject)
   );
   window.dispatchEvent(new Event(DEVELOPMENT_TASKS_UPDATED_EVENT));
+  scheduleWorkstreamStateSync("development");
 }
 
 export function writeDevelopmentTasksForProject(

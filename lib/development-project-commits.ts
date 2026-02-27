@@ -1,4 +1,5 @@
-﻿export const DEVELOPMENT_PROJECT_COMMITS_STORAGE_KEY =
+import { scheduleWorkstreamStateSync } from "@/lib/supabase/workstream-state-client";
+export const DEVELOPMENT_PROJECT_COMMITS_STORAGE_KEY =
   "internal-system-development-project-commits";
 const DEVELOPMENT_PROJECT_COMMITS_UPDATED_EVENT =
   "internal-system-development-project-commits-updated";
@@ -138,6 +139,7 @@ export function writeDevelopmentProjectCommitLogs(
     JSON.stringify(logs)
   );
   window.dispatchEvent(new Event(DEVELOPMENT_PROJECT_COMMITS_UPDATED_EVENT));
+  scheduleWorkstreamStateSync("development");
 }
 
 function createDevelopmentProjectCommitLogId(): string {

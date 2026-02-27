@@ -1,10 +1,15 @@
-﻿export const DEVELOPMENT_MEMBERS_STORAGE_KEY = "internal-system-development-members";
+import { scheduleWorkstreamStateSync } from "@/lib/supabase/workstream-state-client";
+export const DEVELOPMENT_MEMBERS_STORAGE_KEY = "internal-system-development-members";
 const DEVELOPMENT_MEMBERS_UPDATED_EVENT = "internal-system-development-members-updated";
+
+export type DevelopmentMemberSource = "internal" | "external";
 
 export type DevelopmentMember = {
   id: string;
   name: string;
   hoursAllocated: number;
+  source: DevelopmentMemberSource;
+  userId: string | null;
 };
 
 export type DevelopmentMembersByProject = Record<string, DevelopmentMember[]>;
@@ -19,6 +24,8 @@ function parseMember(value: unknown, fallbackIndex: number): DevelopmentMember |
       id: `legacy-${fallbackIndex}`,
       name: trimmedName,
       hoursAllocated: 0,
+      source: "internal",
+      userId: null,
     };
   }
 
@@ -41,11 +48,19 @@ function parseMember(value: unknown, fallbackIndex: number): DevelopmentMember |
     member.hoursAllocated >= 0
       ? member.hoursAllocated
       : 0;
+  const source: DevelopmentMemberSource =
+    member.source === "external" ? "external" : "internal";
+  const userId =
+    typeof member.userId === "string" && member.userId.trim()
+      ? member.userId.trim()
+      : null;
 
   return {
     id,
     name: member.name.trim(),
     hoursAllocated,
+    source,
+    userId,
   };
 }
 
@@ -121,6 +136,7 @@ export function writeDevelopmentMembersByProject(
     JSON.stringify(membersByProject)
   );
   window.dispatchEvent(new Event(DEVELOPMENT_MEMBERS_UPDATED_EVENT));
+  scheduleWorkstreamStateSync("development");
 }
 
 export function writeDevelopmentMembersForProject(

@@ -1,3 +1,6 @@
+import { scheduleWorkstreamStateSync } from "@/lib/supabase/workstream-state-client";
+export type MarketingMemberSource = "internal" | "external";
+
 export const MARKETING_MEMBERS_STORAGE_KEY = "internal-system-marketing-members";
 const MARKETING_MEMBERS_UPDATED_EVENT = "internal-system-marketing-members-updated";
 
@@ -5,6 +8,8 @@ export type MarketingMember = {
   id: string;
   name: string;
   hoursAllocated: number;
+  source: MarketingMemberSource;
+  userId: string | null;
 };
 
 export type MarketingMembersByProject = Record<string, MarketingMember[]>;
@@ -19,6 +24,8 @@ function parseMember(value: unknown, fallbackIndex: number): MarketingMember | n
       id: `legacy-${fallbackIndex}`,
       name: trimmedName,
       hoursAllocated: 0,
+      source: "internal",
+      userId: null,
     };
   }
 
@@ -41,11 +48,19 @@ function parseMember(value: unknown, fallbackIndex: number): MarketingMember | n
     member.hoursAllocated >= 0
       ? member.hoursAllocated
       : 0;
+  const source: MarketingMemberSource =
+    member.source === "external" ? "external" : "internal";
+  const userId =
+    typeof member.userId === "string" && member.userId.trim()
+      ? member.userId.trim()
+      : null;
 
   return {
     id,
     name: member.name.trim(),
     hoursAllocated,
+    source,
+    userId,
   };
 }
 
@@ -121,6 +136,7 @@ export function writeMarketingMembersByProject(
     JSON.stringify(membersByProject)
   );
   window.dispatchEvent(new Event(MARKETING_MEMBERS_UPDATED_EVENT));
+  scheduleWorkstreamStateSync("marketing");
 }
 
 export function writeMarketingMembersForProject(

@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import Link from "next/link";
 import {
@@ -92,6 +92,7 @@ import {
 const UNASSIGNED_VALUE = "__UNASSIGNED__";
 const ALL_FILTER_VALUE = "__ALL__";
 const UNASSIGNED_FILTER_VALUE = "__UNASSIGNED_FILTER__";
+const EXTERNAL_MEMBER_VALUE = "__EXTERNAL_MEMBER__";
 const DEVELOPMENT_FILTERS_STORAGE_KEY = "internal-system-development-filters";
 const DEVELOPMENT_TASK_VIEW_STORAGE_KEY = "internal-system-development-task-view";
 const DEVELOPMENT_KANBAN_GROUPS_STORAGE_KEY =
@@ -120,9 +121,15 @@ type RecurringFiltersState = {
   priority: TaskPriorityFilterValue;
   status: TaskStatusFilterValue;
 };
-type TeamEditRow = {
+type LoggedPerson = {
   id: string;
   name: string;
+  email: string;
+};
+type TeamEditRow = {
+  id: string;
+  memberSelection: string;
+  externalName: string;
   hoursAllocatedInput: string;
 };
 type TaskFilterState = {
@@ -151,6 +158,7 @@ type TimelineDateRange = {
 };
 type KanbanAssigneeGroup = {
   key: string;
+  assigneeKey: string;
   label: string;
   tasks: DevelopmentTask[];
 };
@@ -198,6 +206,20 @@ const parseAssigneeSelection = (value: string): string | null =>
 
 const formatAssigneeSelection = (value: string | null): string =>
   value ?? UNASSIGNED_VALUE;
+
+const normalizeNameValue = (value: string): string => value.trim().toLowerCase();
+const stripExternalSuffix = (value: string): string =>
+  value.trim().replace(/\s+external$/i, "");
+const toExternalMemberName = (value: string): string => {
+  const baseName = stripExternalSuffix(value);
+  return baseName ? `${baseName} external` : "";
+};
+
+const formatMemberName = (member: DevelopmentMember): string =>
+  member.source === "external" ? toExternalMemberName(member.name) : member.name;
+
+const formatMemberSummary = (member: DevelopmentMember): string =>
+  `${formatMemberName(member)}(${member.hoursAllocated}h)`;
 
 const formatHours = (value: number): string => {
   const roundedValue = Math.round(value * 100) / 100;
@@ -518,6 +540,7 @@ const formatCommitFieldLabel = (field: string): string => {
 type TaskCardProps = {
   task: DevelopmentTask;
   taskById: Map<string, DevelopmentTask>;
+  assigneeLabelByName: Map<string, string>;
   currentWeekDates: WeekDateEntry[];
   todayDateString: string;
   onOpenTask: (task: DevelopmentTask) => void;
@@ -528,6 +551,7 @@ type TaskCardProps = {
 function TaskCard({
   task,
   taskById,
+  assigneeLabelByName,
   currentWeekDates,
   todayDateString,
   onOpenTask,
@@ -574,6 +598,9 @@ function TaskCard({
     : isDueTodayCard
       ? "border-yellow-200 bg-yellow-50/80"
       : "border-black/10 bg-white";
+  const assigneeDisplayLabel = task.assignee
+    ? assigneeLabelByName.get(task.assignee) ?? task.assignee
+    : null;
 
   const stopDragStart = (event: PointerEvent<HTMLButtonElement>) => {
     event.stopPropagation();
@@ -654,8 +681,8 @@ function TaskCard({
       {hasBlocker ? (
         <p className="mt-1 text-xs text-red-700/85">Blocked by: {task.blockerReason}</p>
       ) : null}
-      {task.assignee ? (
-        <p className="mt-1 text-xs text-black/60">Assignee: {task.assignee}</p>
+      {assigneeDisplayLabel ? (
+        <p className="mt-1 text-xs text-black/60">Assignee: {assigneeDisplayLabel}</p>
       ) : null}
       <div className="mt-3 flex flex-wrap gap-2">
         <button
@@ -727,6 +754,10 @@ function KanbanColumn({
   const { isOver, setNodeRef } = useDroppable({
     id: getColumnId(status),
   });
+  const memberLabelByName = useMemo(
+    () => new Map(members.map((member) => [member.name, formatMemberName(member)] as const)),
+    [members]
+  );
   const groupedTasks = useMemo<KanbanAssigneeGroup[]>(() => {
     const tasksByAssignee = new Map<string, DevelopmentTask[]>();
 
@@ -760,10 +791,11 @@ function KanbanColumn({
 
     return orderedAssigneeNames.map((assigneeName) => ({
       key: getKanbanGroupKey(status, assigneeName),
-      label: assigneeName,
+      assigneeKey: assigneeName,
+      label: memberLabelByName.get(assigneeName) ?? assigneeName,
       tasks: tasksByAssignee.get(assigneeName) ?? [],
     }));
-  }, [members, status, tasks]);
+  }, [memberLabelByName, members, status, tasks]);
   const visibleTaskIds = groupedTasks.flatMap((group) =>
     collapsedGroupMap[group.key] ? [] : group.tasks.map((task) => task.id)
   );
@@ -808,7 +840,7 @@ function KanbanColumn({
                     <div className="flex items-center gap-2">
                       {(() => {
                         const openWipCount =
-                          openWipCountByAssignee.get(group.label) ?? 0;
+                          openWipCountByAssignee.get(group.assigneeKey) ?? 0;
                         if (openWipCount < WIP_WARNING_THRESHOLD) {
                           return null;
                         }
@@ -833,6 +865,7 @@ function KanbanColumn({
                           key={task.id}
                           task={task}
                           taskById={taskById}
+                          assigneeLabelByName={memberLabelByName}
                           currentWeekDates={currentWeekDates}
                           todayDateString={todayDateString}
                           onOpenTask={onOpenTask}
@@ -890,6 +923,17 @@ export default function DevelopmentProjectPage() {
     () => membersByProject[projectId] ?? [],
     [projectId, membersByProject]
   );
+  const memberLabelByName = useMemo(
+    () => new Map(members.map((member) => [member.name, formatMemberName(member)] as const)),
+    [members]
+  );
+  const formatAssigneeDisplay = (assignee: string | null): string => {
+    if (!assignee) {
+      return "Unassigned";
+    }
+
+    return memberLabelByName.get(assignee) ?? assignee;
+  };
   const projectCommitLogs = useMemo(
     () =>
       allProjectCommitLogs
@@ -904,6 +948,7 @@ export default function DevelopmentProjectPage() {
   const [isCommitLogsModalOpen, setIsCommitLogsModalOpen] = useState(false);
   const [teamEditRows, setTeamEditRows] = useState<TeamEditRow[]>([]);
   const [teamEditError, setTeamEditError] = useState("");
+  const [loggedPeople, setLoggedPeople] = useState<LoggedPerson[]>([]);
 
   const [isTaskFormOpen, setIsTaskFormOpen] = useState(false);
   const [activeTasksTab, setActiveTasksTab] = useState<TasksSectionTab>("tasks");
@@ -1043,6 +1088,65 @@ export default function DevelopmentProjectPage() {
 
     return counts;
   }, [tasks]);
+
+  const loggedPeopleById = useMemo(
+    () => new Map(loggedPeople.map((person) => [person.id, person] as const)),
+    [loggedPeople]
+  );
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadLoggedPeople = async () => {
+      try {
+        const response = await fetch("/api/auth/people", { cache: "no-store" });
+        const payload = (await response.json().catch(() => ({}))) as {
+          users?: Array<{
+            id?: unknown;
+            name?: unknown;
+            email?: unknown;
+          }>;
+        };
+
+        if (!response.ok || !Array.isArray(payload.users)) {
+          if (isMounted) {
+            setLoggedPeople([]);
+          }
+          return;
+        }
+
+        const parsedUsers = payload.users
+          .map((user) => {
+            if (
+              typeof user.id !== "string" ||
+              typeof user.name !== "string" ||
+              typeof user.email !== "string"
+            ) {
+              return null;
+            }
+            return {
+              id: user.id,
+              name: user.name.trim(),
+              email: user.email.trim(),
+            };
+          })
+          .filter((user): user is LoggedPerson => user !== null);
+
+        if (isMounted) {
+          setLoggedPeople(parsedUsers);
+        }
+      } catch {
+        if (isMounted) {
+          setLoggedPeople([]);
+        }
+      }
+    };
+
+    loadLoggedPeople();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1576,7 +1680,7 @@ export default function DevelopmentProjectPage() {
 
       return {
         id: member.id,
-        name: member.name,
+        name: formatMemberName(member),
         allocatedHours: member.hoursAllocated,
         assignedHours,
         assignedCount: memberTasks.length,
@@ -1736,11 +1840,30 @@ export default function DevelopmentProjectPage() {
 
   const openTeamEditModal = () => {
     setTeamEditRows(
-      members.map((member) => ({
-        id: member.id,
-        name: member.name,
-        hoursAllocatedInput: String(member.hoursAllocated),
-      }))
+      members.map((member) => {
+        const matchedPerson =
+          (member.userId ? loggedPeopleById.get(member.userId) : null) ??
+          loggedPeople.find(
+            (person) =>
+              normalizeNameValue(person.name) === normalizeNameValue(member.name)
+          );
+
+        if (member.source === "external" || !matchedPerson) {
+          return {
+            id: member.id,
+            memberSelection: EXTERNAL_MEMBER_VALUE,
+            externalName: stripExternalSuffix(member.name),
+            hoursAllocatedInput: String(member.hoursAllocated),
+          };
+        }
+
+        return {
+          id: member.id,
+          memberSelection: matchedPerson.id,
+          externalName: "",
+          hoursAllocatedInput: String(member.hoursAllocated),
+        };
+      })
     );
     setTeamEditError("");
     setIsTeamEditModalOpen(true);
@@ -1757,15 +1880,31 @@ export default function DevelopmentProjectPage() {
       ...rows,
       {
         id: createDevelopmentMemberId(),
-        name: "",
+        memberSelection: "",
+        externalName: "",
         hoursAllocatedInput: "",
       },
     ]);
   };
 
-  const updateTeamEditRowName = (memberId: string, nextName: string) => {
+  const updateTeamEditRowSelection = (memberId: string, nextSelection: string) => {
     setTeamEditRows((rows) =>
-      rows.map((row) => (row.id === memberId ? { ...row, name: nextName } : row))
+      rows.map((row) =>
+        row.id === memberId
+          ? {
+              ...row,
+              memberSelection: nextSelection,
+            }
+          : row
+      )
+    );
+  };
+
+  const updateTeamEditRowExternalName = (memberId: string, nextName: string) => {
+    setTeamEditRows((rows) =>
+      rows.map((row) =>
+        row.id === memberId ? { ...row, externalName: nextName } : row
+      )
     );
   };
 
@@ -1786,21 +1925,51 @@ export default function DevelopmentProjectPage() {
   };
 
   const saveTeamMembers = () => {
-    const normalizedRows = teamEditRows.map((row) => ({
-      name: row.name.trim(),
+    const normalizedRows = teamEditRows.map((row) => {
+      const selectedPerson =
+        row.memberSelection === EXTERNAL_MEMBER_VALUE
+          ? null
+          : loggedPeopleById.get(row.memberSelection) ?? null;
+      const isExternal = row.memberSelection === EXTERNAL_MEMBER_VALUE || !selectedPerson;
+
+      return {
+        id: row.id,
+        name: isExternal
+          ? toExternalMemberName(row.externalName)
+          : selectedPerson.name.trim(),
+        hoursAllocated:
+          row.hoursAllocatedInput.trim() === ""
+            ? 0
+            : Number(row.hoursAllocatedInput),
+        source: (isExternal ? "external" : "internal") as DevelopmentMember["source"],
+        userId: isExternal ? null : selectedPerson.id,
+        hasInvalidSelection:
+          row.memberSelection !== EXTERNAL_MEMBER_VALUE && selectedPerson === null,
+      };
+    });
+
+    if (normalizedRows.some((row) => row.hasInvalidSelection)) {
+      setTeamEditError(
+        "Select a logged-in member from the list, or choose external and enter a name."
+      );
+      return;
+    }
+
+    const membersToSave: DevelopmentMember[] = normalizedRows.map((row) => ({
       id: row.id,
-      hoursAllocated:
-        row.hoursAllocatedInput.trim() === ""
-          ? 0
-          : Number(row.hoursAllocatedInput),
+      name: row.name,
+      hoursAllocated: row.hoursAllocated,
+      source: row.source,
+      userId: row.userId,
     }));
 
-    if (normalizedRows.some((row) => !row.name)) {
+    if (membersToSave.some((row) => !row.name)) {
       setTeamEditError("Member name is required.");
       return;
     }
+
     if (
-      normalizedRows.some(
+      membersToSave.some(
         (row) => !Number.isFinite(row.hoursAllocated) || row.hoursAllocated < 0
       )
     ) {
@@ -1809,7 +1978,7 @@ export default function DevelopmentProjectPage() {
     }
 
     const uniqueNames = new Set<string>();
-    for (const row of normalizedRows) {
+    for (const row of membersToSave) {
       const normalizedName = row.name.toLowerCase();
       if (uniqueNames.has(normalizedName)) {
         setTeamEditError("Member names must be unique.");
@@ -1819,28 +1988,26 @@ export default function DevelopmentProjectPage() {
     }
 
     const previousMembersLabel =
-      members.map((member) => `${member.name}(${member.hoursAllocated}h)`).join(", ") ||
-      "None";
+      members.map((member) => formatMemberSummary(member)).join(", ") || "None";
     const nextMembersLabel =
-      normalizedRows.map((member) => `${member.name}(${member.hoursAllocated}h)`).join(", ") ||
-      "None";
+      membersToSave.map((member) => formatMemberSummary(member)).join(", ") || "None";
 
     const previousById = new Map(members.map((member) => [member.id, member]));
-    const nextById = new Map(normalizedRows.map((member) => [member.id, member]));
+    const nextById = new Map(membersToSave.map((member) => [member.id, member]));
 
     const removedNames = members
       .filter((member) => !nextById.has(member.id))
       .map((member) => member.name);
     const renamedFromTo = new Map<string, string>();
 
-    normalizedRows.forEach((nextMember) => {
+    membersToSave.forEach((nextMember) => {
       const previousMember = previousById.get(nextMember.id);
       if (previousMember && previousMember.name !== nextMember.name) {
         renamedFromTo.set(previousMember.name, nextMember.name);
       }
     });
 
-    writeProjectMembers(normalizedRows);
+    writeProjectMembers(membersToSave);
     if (previousMembersLabel !== nextMembersLabel) {
       appendProjectCommitLogs([
         {
@@ -1887,13 +2054,13 @@ export default function DevelopmentProjectPage() {
     }
 
     const currentTaskAssignee = parseAssigneeSelection(taskAssignee);
-    if (currentTaskAssignee && !normalizedRows.some((m) => m.name === currentTaskAssignee)) {
+    if (currentTaskAssignee && !membersToSave.some((m) => m.name === currentTaskAssignee)) {
       setTaskAssignee(UNASSIGNED_VALUE);
     }
     const currentModalAssignee = parseAssigneeSelection(modalAssignee);
     if (
       currentModalAssignee &&
-      !normalizedRows.some((m) => m.name === currentModalAssignee)
+      !membersToSave.some((m) => m.name === currentModalAssignee)
     ) {
       setModalAssignee(UNASSIGNED_VALUE);
     }
@@ -2798,9 +2965,7 @@ export default function DevelopmentProjectPage() {
           <span className="min-w-[220px] flex-1 text-black/75">
             {members.length === 0
               ? "None"
-              : members
-                  .map((member) => `${member.name}(${member.hoursAllocated}h)`)
-                  .join(", ")}
+              : members.map((member) => formatMemberSummary(member)).join(", ")}
           </span>
           <span className="text-xs text-black/60">
             Allocated total {formatHours(
@@ -2965,7 +3130,7 @@ export default function DevelopmentProjectPage() {
                         <option value={UNASSIGNED_VALUE}>Unassigned</option>
                         {members.map((member) => (
                           <option key={member.id} value={member.name}>
-                            {member.name}
+                            {formatMemberName(member)}
                           </option>
                         ))}
                       </select>
@@ -3208,7 +3373,7 @@ export default function DevelopmentProjectPage() {
                   <option value={UNASSIGNED_FILTER_VALUE}>Unassigned</option>
                   {members.map((member) => (
                     <option key={member.id} value={member.name}>
-                      {member.name}
+                      {formatMemberName(member)}
                     </option>
                   ))}
                 </select>
@@ -3494,7 +3659,7 @@ export default function DevelopmentProjectPage() {
                                     </span>
                                     {entry.task.assignee ? (
                                       <span className="truncate text-[11px] text-black/60">
-                                        {entry.task.assignee}
+                                        {formatAssigneeDisplay(entry.task.assignee)}
                                       </span>
                                     ) : null}
                                     {isOverdue ? (
@@ -3611,7 +3776,7 @@ export default function DevelopmentProjectPage() {
                             >
                               <p className="text-sm font-medium">{task.title}</p>
                               <p className="mt-1 text-xs text-black/60">
-                                {task.assignee ?? "Unassigned"} · Due {task.dueDate}
+                                {formatAssigneeDisplay(task.assignee)} · Due {task.dueDate}
                               </p>
                               <div className="mt-2 flex flex-wrap gap-2">
                                 <span
@@ -3872,7 +4037,7 @@ export default function DevelopmentProjectPage() {
                   <option value={UNASSIGNED_FILTER_VALUE}>Unassigned</option>
                   {members.map((member) => (
                     <option key={member.id} value={member.name}>
-                      {member.name}
+                      {formatMemberName(member)}
                     </option>
                   ))}
                 </select>
@@ -3904,7 +4069,7 @@ export default function DevelopmentProjectPage() {
                       <div className="min-w-[220px] flex-1">
                         <p className="text-sm font-medium">{task.title}</p>
                         <p className="mt-1 text-xs text-black/60">
-                          {task.assignee ?? "Unassigned"} · Weekly allocated{" "}
+                          {formatAssigneeDisplay(task.assignee)} · Weekly allocated{" "}
                           {formatHours(
                             recurringWeeklyAllocatedHoursByTask.get(task.id) ?? 0
                           )}
@@ -3967,15 +4132,38 @@ export default function DevelopmentProjectPage() {
             <div className="mt-4 space-y-3">
               {teamEditRows.map((row) => (
                 <div key={row.id} className="grid grid-cols-[1fr_160px_auto] gap-3">
-                  <input
-                    type="text"
-                    value={row.name}
-                    onChange={(event) =>
-                      updateTeamEditRowName(row.id, event.target.value)
-                    }
-                    placeholder="Name"
-                    className="rounded-md border border-black/20 px-3 py-2 text-sm"
-                  />
+                  <div className="flex min-w-0 items-center gap-2">
+                    <select
+                      value={row.memberSelection}
+                      onChange={(event) =>
+                        updateTeamEditRowSelection(row.id, event.target.value)
+                      }
+                      className={`rounded-md border border-black/20 px-3 py-2 text-sm ${
+                        row.memberSelection === EXTERNAL_MEMBER_VALUE
+                          ? "w-44 shrink-0"
+                          : "w-full"
+                      }`}
+                    >
+                      <option value="">Select internal member</option>
+                      {loggedPeople.map((person) => (
+                        <option key={person.id} value={person.id}>
+                          {person.name}
+                        </option>
+                      ))}
+                      <option value={EXTERNAL_MEMBER_VALUE}>Add external</option>
+                    </select>
+                    {row.memberSelection === EXTERNAL_MEMBER_VALUE ? (
+                      <input
+                        type="text"
+                        value={row.externalName}
+                        onChange={(event) =>
+                          updateTeamEditRowExternalName(row.id, event.target.value)
+                        }
+                        placeholder="External member name"
+                        className="min-w-0 flex-1 rounded-md border border-black/20 px-3 py-2 text-sm"
+                      />
+                    ) : null}
+                  </div>
                   <input
                     type="text"
                     inputMode="numeric"
@@ -4006,6 +4194,10 @@ export default function DevelopmentProjectPage() {
             >
               + Add member
             </button>
+            <p className="mt-2 text-xs text-black/60">
+              Pick from logged-in people, or choose external to add someone outside the
+              system.
+            </p>
             {teamEditError ? (
               <p className="mt-3 text-sm text-red-600">{teamEditError}</p>
             ) : null}
@@ -4383,7 +4575,7 @@ export default function DevelopmentProjectPage() {
                       <option value={UNASSIGNED_VALUE}>Unassigned</option>
                       {members.map((member) => (
                         <option key={member.id} value={member.name}>
-                          {member.name}
+                          {formatMemberName(member)}
                         </option>
                       ))}
                     </select>

@@ -1,3 +1,4 @@
+import { scheduleWorkstreamStateSync } from "@/lib/supabase/workstream-state-client";
 export type MarketingProjectPriority = "High" | "Medium" | "Low";
 
 export const MARKETING_PROJECT_PRIORITY_OPTIONS: MarketingProjectPriority[] = [
@@ -197,6 +198,7 @@ export function writeMarketingProjects(projects: MarketingProject[]): void {
     JSON.stringify(projects)
   );
   window.dispatchEvent(new Event(MARKETING_PROJECTS_UPDATED_EVENT));
+  scheduleWorkstreamStateSync("marketing");
 }
 
 export function writeMarketingTags(tags: string[]): void {
@@ -209,6 +211,7 @@ export function writeMarketingTags(tags: string[]): void {
     JSON.stringify(normalizeTags(tags))
   );
   window.dispatchEvent(new Event(MARKETING_TAGS_UPDATED_EVENT));
+  scheduleWorkstreamStateSync("marketing");
 }
 
 export function subscribeToMarketingProjects(

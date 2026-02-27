@@ -1,3 +1,4 @@
+import { scheduleWorkstreamStateSync } from "@/lib/supabase/workstream-state-client";
 export const MARKETING_PROJECT_COMMITS_STORAGE_KEY =
   "internal-system-marketing-project-commits";
 const MARKETING_PROJECT_COMMITS_UPDATED_EVENT =
@@ -138,6 +139,7 @@ export function writeMarketingProjectCommitLogs(
     JSON.stringify(logs)
   );
   window.dispatchEvent(new Event(MARKETING_PROJECT_COMMITS_UPDATED_EVENT));
+  scheduleWorkstreamStateSync("marketing");
 }
 
 function createMarketingProjectCommitLogId(): string {

@@ -6,12 +6,16 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "migrate:supabase": "node scripts/migrate-local-data-to-supabase.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
+    "@supabase/supabase-js": "^2.98.0",
+    "bcryptjs": "^3.0.3",
+    "jose": "^6.1.3",
     "lucide-react": "^0.564.0",
     "next": "16.1.6",
     "react": "19.2.3",

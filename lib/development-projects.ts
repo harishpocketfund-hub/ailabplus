@@ -1,4 +1,5 @@
-﻿export type DevelopmentProjectPriority = "High" | "Medium" | "Low";
+import { scheduleWorkstreamStateSync } from "@/lib/supabase/workstream-state-client";
+export type DevelopmentProjectPriority = "High" | "Medium" | "Low";
 
 export const DEVELOPMENT_PROJECT_PRIORITY_OPTIONS: DevelopmentProjectPriority[] = [
   "High",
@@ -197,6 +198,7 @@ export function writeDevelopmentProjects(projects: DevelopmentProject[]): void {
     JSON.stringify(projects)
   );
   window.dispatchEvent(new Event(DEVELOPMENT_PROJECTS_UPDATED_EVENT));
+  scheduleWorkstreamStateSync("development");
 }
 
 export function writeDevelopmentTags(tags: string[]): void {
@@ -209,6 +211,7 @@ export function writeDevelopmentTags(tags: string[]): void {
     JSON.stringify(normalizeTags(tags))
   );
   window.dispatchEvent(new Event(DEVELOPMENT_TAGS_UPDATED_EVENT));
+  scheduleWorkstreamStateSync("development");
 }
 
 export function subscribeToDevelopmentProjects(

@@ -1,4 +1,4 @@
-﻿
+
 "use client";
 
 import Link from "next/link";
@@ -64,6 +64,18 @@ import {
   TASK_STATUS_OPTIONS,
   writeMarketingTasksForProject,
 } from "@/lib/marketing-tasks";
+import {
+  getDevelopmentProjectsServerSnapshot,
+  getDevelopmentProjectsSnapshot,
+  parseDevelopmentProjects,
+  subscribeToDevelopmentProjects,
+} from "@/lib/development-projects";
+import {
+  getDevelopmentTasksServerSnapshot,
+  getDevelopmentTasksSnapshot,
+  parseDevelopmentTasksByProject,
+  subscribeToDevelopmentTasks,
+} from "@/lib/development-tasks";
 
 const ALL_FILTER_VALUE = "__ALL__";
 const UNASSIGNED_VALUE = "__UNASSIGNED__";
@@ -122,6 +134,16 @@ type DeleteTarget = {
   projectId: string;
   taskId: string;
 } | null;
+
+type MyWorkSummaryStream = "Marketing" | "Development";
+
+type SummaryAssignedTask = {
+  stream: MyWorkSummaryStream;
+  projectId: string;
+  projectName: string;
+  dueDate: string;
+  status: MarketingTaskStatus;
+};
 
 const createDefaultFilters = (): MyWorkFilters => ({
   search: "",
@@ -555,12 +577,26 @@ export default function MyWorkPage() {
     getMarketingMembersSnapshot,
     getMarketingMembersServerSnapshot
   );
+  const rawDevelopmentProjects = useSyncExternalStore(
+    subscribeToDevelopmentProjects,
+    getDevelopmentProjectsSnapshot,
+    getDevelopmentProjectsServerSnapshot
+  );
+  const rawDevelopmentTasksByProject = useSyncExternalStore(
+    subscribeToDevelopmentTasks,
+    getDevelopmentTasksSnapshot,
+    getDevelopmentTasksServerSnapshot
+  );
 
   const user = parseDemoUser(rawUser);
   const userName = user?.name ?? "";
   const projects = parseMarketingProjects(rawProjects);
   const tasksByProject = parseMarketingTasksByProject(rawTasksByProject);
   const membersByProject = parseMarketingMembersByProject(rawMembersByProject);
+  const developmentProjects = parseDevelopmentProjects(rawDevelopmentProjects);
+  const developmentTasksByProject = parseDevelopmentTasksByProject(
+    rawDevelopmentTasksByProject
+  );
 
   const [activeTab, setActiveTab] = useState<MyWorkTab>("today");
   const [filters, setFilters] = useState<MyWorkFilters>(createDefaultFilters);
@@ -635,6 +671,110 @@ export default function MyWorkPage() {
 
     return entries;
   }, [membersByProject, projects, tasksByProject, userName]);
+
+  const summaryAssignedTasks = useMemo(() => {
+    const normalizedUserName = userName.trim().toLowerCase();
+    if (!normalizedUserName) {
+      return [] as SummaryAssignedTask[];
+    }
+
+    const summaryTasks: SummaryAssignedTask[] = taskEntries.map((entry) => ({
+      stream: "Marketing",
+      projectId: entry.projectId,
+      projectName: entry.project.name,
+      dueDate: entry.task.dueDate,
+      status: entry.task.status,
+    }));
+
+    const developmentProjectById = new Map(
+      developmentProjects.map((project) => [project.id, project])
+    );
+    Object.entries(developmentTasksByProject).forEach(([projectId, projectTasks]) => {
+      const project = developmentProjectById.get(projectId);
+      if (!project) {
+        return;
+      }
+
+      projectTasks.forEach((task) => {
+        if ((task.assignee ?? "").trim().toLowerCase() !== normalizedUserName) {
+          return;
+        }
+
+        summaryTasks.push({
+          stream: "Development",
+          projectId,
+          projectName: project.name,
+          dueDate: task.dueDate,
+          status: task.status as MarketingTaskStatus,
+        });
+      });
+    });
+
+    return summaryTasks;
+  }, [developmentProjects, developmentTasksByProject, taskEntries, userName]);
+
+  const summaryStatusCounts = useMemo(() => {
+    const counts: Record<MarketingTaskStatus, number> = {
+      "To Do": 0,
+      "In Progress": 0,
+      Review: 0,
+      Done: 0,
+    };
+
+    summaryAssignedTasks.forEach((task) => {
+      counts[task.status] += 1;
+    });
+
+    return counts;
+  }, [summaryAssignedTasks]);
+
+  const summaryProjects = useMemo(() => {
+    const byProjectKey = new Map<
+      string,
+      {
+        stream: MyWorkSummaryStream;
+        projectId: string;
+        projectName: string;
+        total: number;
+        open: number;
+        overdue: number;
+      }
+    >();
+
+    summaryAssignedTasks.forEach((task) => {
+      const key = `${task.stream}:${task.projectId}`;
+      const current =
+        byProjectKey.get(key) ??
+        {
+          stream: task.stream,
+          projectId: task.projectId,
+          projectName: task.projectName,
+          total: 0,
+          open: 0,
+          overdue: 0,
+        };
+
+      current.total += 1;
+      if (task.status !== "Done") {
+        current.open += 1;
+        if (task.dueDate && task.dueDate < todayIsoDate) {
+          current.overdue += 1;
+        }
+      }
+
+      byProjectKey.set(key, current);
+    });
+
+    return [...byProjectKey.values()].sort((firstProject, secondProject) => {
+      if (firstProject.open !== secondProject.open) {
+        return secondProject.open - firstProject.open;
+      }
+      if (firstProject.overdue !== secondProject.overdue) {
+        return secondProject.overdue - firstProject.overdue;
+      }
+      return firstProject.projectName.localeCompare(secondProject.projectName);
+    });
+  }, [summaryAssignedTasks, todayIsoDate]);
 
   const taskEntryByKey = useMemo(() => {
     return new Map(taskEntries.map((entry) => [entry.key, entry]));
@@ -1878,7 +2018,7 @@ export default function MyWorkPage() {
           </section>
         </div>
 
-        <aside className="xl:sticky xl:top-6 xl:self-start">
+        <aside className="space-y-5 xl:sticky xl:top-6 xl:self-start">
           <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-base font-semibold">Todo List</h2>
@@ -1979,6 +2119,68 @@ export default function MyWorkPage() {
                 Add items to plan your day. This list is personal and separate from the work queue.
               </p>
             ) : null}
+          </section>
+
+          <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+            <h2 className="text-base font-semibold">Work Insights</h2>
+
+            <div className="mt-3 space-y-2">
+              <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                Project split
+              </p>
+              {summaryProjects.length === 0 ? (
+                <p className="rounded-md border border-dashed border-slate-300 p-2.5 text-xs text-slate-600">
+                  No assigned projects yet.
+                </p>
+              ) : (
+                <div className="max-h-48 space-y-1.5 overflow-y-auto pr-1">
+                  {summaryProjects.map((project) => (
+                    <Link
+                      key={`${project.stream}:${project.projectId}`}
+                      href={
+                        project.stream === "Marketing"
+                          ? `/marketing/projects/${project.projectId}`
+                          : `/development/projects/${project.projectId}`
+                      }
+                      className="block rounded-md border border-slate-200 bg-slate-50 px-2.5 py-2 text-xs hover:bg-slate-100"
+                    >
+                      <p className="truncate font-medium text-slate-900">{project.projectName}</p>
+                      <p className="mt-0.5 text-slate-600">
+                        {project.stream} · Open {project.open} · Overdue {project.overdue}
+                      </p>
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="mt-4 space-y-2">
+              <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                Status breakdown
+              </p>
+              {(["To Do", "In Progress", "Review", "Done"] as MarketingTaskStatus[]).map(
+                (status) => {
+                  const count = summaryStatusCounts[status];
+                  const total = summaryAssignedTasks.length;
+                  const width = total > 0 ? (count / total) * 100 : 0;
+
+                  return (
+                    <div key={status} className="space-y-1">
+                      <div className="flex items-center justify-between text-xs text-slate-600">
+                        <span>{status}</span>
+                        <span>{count}</span>
+                      </div>
+                      <div className="h-1.5 rounded bg-slate-100">
+                        <div
+                          className="h-1.5 rounded bg-slate-500"
+                          style={{ width: `${Math.max(0, width)}%` }}
+                        />
+                      </div>
+                    </div>
+                  );
+                }
+              )}
+            </div>
           </section>
         </aside>
       </div>

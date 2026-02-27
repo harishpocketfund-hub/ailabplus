@@ -1,3 +1,4 @@
+import { scheduleWorkstreamStateSync } from "@/lib/supabase/workstream-state-client";
 export const MARKETING_TASKS_STORAGE_KEY = "internal-system-marketing-tasks";
 const MARKETING_TASKS_UPDATED_EVENT = "internal-system-marketing-tasks-updated";
 
@@ -322,6 +323,7 @@ export function writeMarketingTasksByProject(
     JSON.stringify(tasksByProject)
   );
   window.dispatchEvent(new Event(MARKETING_TASKS_UPDATED_EVENT));
+  scheduleWorkstreamStateSync("marketing");
 }
 
 export function writeMarketingTasksForProject(
