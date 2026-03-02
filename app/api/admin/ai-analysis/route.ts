@@ -389,16 +389,49 @@ function buildSystemPrompt(intent: QueryIntent): string {
   ].join("\n");
 }
 
+function isAllMembersScope(member: string): boolean {
+  const normalized = member.trim().toLowerCase();
+  return (
+    normalized === "all" ||
+    normalized === "all team members" ||
+    normalized === "all members" ||
+    normalized === "everyone"
+  );
+}
+
+function buildIndividualOpeningRule(context: AiScopeSnapshot): string {
+  if (isAllMembersScope(context.scope.member)) {
+    return "";
+  }
+
+  return [
+    "Individual scope opening requirement:",
+    `- Selected member: ${context.scope.member}`,
+    "- Start the response with one detailed plain-English paragraph and no heading before it.",
+    "- In that first paragraph, explicitly cover all three parts in order: what this person is doing today, what this person is doing this week, and what is overdue for this person.",
+    "- Use evidence-backed task and project details from the context.",
+    "- If one part has no evidence, write exactly \"None right now\" for that part.",
+  ].join("\n");
+}
+
 function buildUserPrompt(
   question: string,
   context: AiScopeSnapshot,
   intent: QueryIntent
 ): string {
   const contextJson = JSON.stringify(context, null, 2);
+  const individualOpeningRule = buildIndividualOpeningRule(context);
   return [
     `Detected intent: ${intent}`,
     "Question from user:",
     question,
+    ...(individualOpeningRule
+      ? [
+          "",
+          "Mandatory output rule for this scope:",
+          individualOpeningRule,
+        ]
+      : []),
     "",
     "Context JSON:",
     contextJson,
@@ -588,7 +621,12 @@ async function requestOpenAiAnswer(
           content:
             mode === "compact_summary"
               ? buildCompactSummarySystemPrompt()
-              : buildSystemPrompt(intent),
+              : [
+                  buildSystemPrompt(intent),
+                  buildIndividualOpeningRule(context),
+                ]
+                  .filter((part) => part.length > 0)
+                  .join("\n\n"),
         },
         {
           role: "user",
