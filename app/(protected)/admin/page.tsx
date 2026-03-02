@@ -4,18 +4,21 @@ import Link from "next/link";
 import {
   Activity,
   AlertTriangle,
+  Bot,
   ClipboardList,
   Flame,
   FolderKanban,
   Gauge,
   Maximize2,
+  MessageSquare,
+  SendHorizontal,
   Tags,
   TrendingUp,
   UserCog,
   Users,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   getMarketingProjectsServerSnapshot,
   getMarketingProjectsSnapshot,
@@ -132,10 +135,53 @@ type LoggedPerson = {
   title: string;
 };
 
-type PersonDirectoryRow = {
-  name: string;
-  position: string;
-  memberType: "Internal" | "External";
+type AiScopedProject = UnifiedProject & {
+  memberNames: string[];
+};
+
+type AiMessage = {
+  id: string;
+  role: "assistant" | "user";
+  text: string;
+};
+
+type GeneratedSummaryEntry = {
+  id: string;
+  generatedAtIso: string;
+  text: string;
+};
+
+type AiContextTaskRow = {
+  title: string;
+  projectName: string;
+  stream: Workstream;
+  status: TaskStatus;
+  priority: TaskPriority;
+  dueDate: string;
+  assignee: string;
+  blocked: boolean;
+};
+
+type AiScopeSnapshot = {
+  scope: {
+    member: string;
+    project: string;
+  };
+  summary: {
+    projects: number;
+    tasks: number;
+    open: number;
+    done: number;
+    overdue: number;
+    dueToday: number;
+    dueThisWeek: number;
+    highPriorityOpen: number;
+    blockedOpen: number;
+  };
+  statusCounts: Record<TaskStatus, number>;
+  topOverdue: AiContextTaskRow[];
+  topPriorityOpen: AiContextTaskRow[];
+  blockedOpen: AiContextTaskRow[];
 };
 
 function toIsoDate(date: Date): string {
@@ -206,6 +252,34 @@ function dueLabel(date: string, today: string): string {
     return "Due today";
   }
   return "Upcoming";
+}
+
+function getDaysFromToday(date: string, today: string): number | null {
+  const dueMs = getDateMs(date);
+  const todayMs = getDateMs(today);
+  if (dueMs === null || todayMs === null) {
+    return null;
+  }
+  return Math.round((dueMs - todayMs) / DAY_MS);
+}
+
+function truncateToWordCount(value: string, maxWords: number): string {
+  const words = value.trim().split(/\s+/).filter((word) => word.length > 0);
+  if (words.length <= maxWords) {
+    return words.join(" ");
+  }
+  return `${words.slice(0, maxWords).join(" ")}...`;
+}
+
+function formatDateTimeWithIndiaLocale(isoValue: string): string {
+  const date = new Date(isoValue);
+  if (Number.isNaN(date.getTime())) {
+    return isoValue;
+  }
+  return new Intl.DateTimeFormat("en-IN", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
 }
 
 function projectHref(project: UnifiedProject): string {
@@ -310,8 +384,29 @@ export default function AdminPage() {
   const developmentMembersByProject = parseDevelopmentMembersByProject(rawDevelopmentMembers);
   const developmentCommits = parseDevelopmentProjectCommitLogs(rawDevelopmentCommits);
   const [isResourceModalOpen, setIsResourceModalOpen] = useState(false);
-  const [isPeopleModalOpen, setIsPeopleModalOpen] = useState(false);
+  const [isAiAnalysisModalOpen, setIsAiAnalysisModalOpen] = useState(false);
   const [loggedPeople, setLoggedPeople] = useState<LoggedPerson[]>([]);
+  const [aiSelectedMember, setAiSelectedMember] = useState("All");
+  const [aiSelectedProjectKey, setAiSelectedProjectKey] = useState("All");
+  const [aiInput, setAiInput] = useState("");
+  const [isAiSending, setIsAiSending] = useState(false);
+  const [aiServiceError, setAiServiceError] = useState<string | null>(null);
+  const [aiMessages, setAiMessages] = useState<AiMessage[]>([]);
+  const [generatedSummaries, setGeneratedSummaries] = useState<GeneratedSummaryEntry[]>([]);
+  const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
+  const [generatedSummaryError, setGeneratedSummaryError] = useState<string | null>(null);
+  const aiMessageCounterRef = useRef(1);
+  const aiQuickQuestions = [
+    {
+      label: "Summary",
+      prompt:
+        "Provide a detailed leadership summary across Marketing and Development with risks, bottlenecks, team signals, actions, and watchlist.",
+    },
+    { label: "Overdue tasks", prompt: "Show overdue tasks and what to fix first." },
+    { label: "Today's tasks", prompt: "What tasks are due today and what should be prioritized?" },
+    { label: "This week plan", prompt: "Give me a plan for this week based on open tasks." },
+    { label: "Main bottlenecks", prompt: "What are the main bottlenecks right now?" },
+  ] as const;
 
   useEffect(() => {
     let isMounted = true;
@@ -368,20 +463,20 @@ export default function AdminPage() {
   }, []);
 
   useEffect(() => {
-    if (!isResourceModalOpen && !isPeopleModalOpen) {
+    if (!isResourceModalOpen && !isAiAnalysisModalOpen) {
       return;
     }
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setIsResourceModalOpen(false);
-        setIsPeopleModalOpen(false);
+        setIsAiAnalysisModalOpen(false);
       }
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [isPeopleModalOpen, isResourceModalOpen]);
+  }, [isAiAnalysisModalOpen, isResourceModalOpen]);
 
   const dashboard = useMemo(() => {
     const today = getTodayIsoDate();
@@ -775,20 +870,6 @@ export default function AdminPage() {
       });
     });
 
-    const peopleDirectoryRows: PersonDirectoryRow[] = [...personMap.values()]
-      .map((row) => ({
-        name: row.name,
-        position:
-          row.position ||
-          (row.memberType === "External" ? "External collaborator" : "Member"),
-        memberType: row.memberType,
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-    const internalPeopleCount = peopleDirectoryRows.filter(
-      (row) => row.memberType === "Internal"
-    ).length;
-    const externalPeopleCount = peopleDirectoryRows.length - internalPeopleCount;
-
     const peopleRows = [...personMap.values()].sort((a, b) => {
       if (a.overdue !== b.overdue) {
         return b.overdue - a.overdue;
@@ -947,8 +1028,6 @@ export default function AdminPage() {
       overdueOpen: overdueOpen.length,
       completionRate: tasks.length ? (doneTasks.length / tasks.length) * 100 : 0,
       uniquePeople: peopleSet.size,
-      internalPeopleCount,
-      externalPeopleCount,
       unassignedOpen: openTasks.filter((task) => !task.assignee).length,
       workstreamSummary,
       activeProjectsByTag,
@@ -962,7 +1041,6 @@ export default function AdminPage() {
       priorityOpenCounts,
       overdueHigh,
       peopleRows,
-      peopleDirectoryRows,
       resourceRows,
       averageUtilization,
       highLoadMembersCount,
@@ -987,6 +1065,455 @@ export default function AdminPage() {
     marketingProjects,
     marketingTasksByProject,
   ]);
+
+  const aiScope = useMemo(() => {
+    const projects: UnifiedProject[] = [
+      ...marketingProjects.map((project) => ({
+        key: `Marketing:${project.id}`,
+        id: project.id,
+        stream: "Marketing" as const,
+        name: project.name,
+        deadline: project.deadline,
+        tags: project.tags,
+        isCompleted: project.isCompleted,
+      })),
+      ...developmentProjects.map((project) => ({
+        key: `Development:${project.id}`,
+        id: project.id,
+        stream: "Development" as const,
+        name: project.name,
+        deadline: project.deadline,
+        tags: project.tags,
+        isCompleted: project.isCompleted,
+      })),
+    ];
+
+    const tasks: UnifiedTask[] = [
+      ...marketingProjects.flatMap((project) =>
+        (marketingTasksByProject[project.id] ?? []).map((task) => ({
+          id: task.id,
+          projectKey: `Marketing:${project.id}`,
+          projectId: project.id,
+          projectName: project.name,
+          stream: "Marketing" as const,
+          title: task.title,
+          dueDate: task.dueDate,
+          status: task.status,
+          priority: task.priority,
+          assignee: task.assignee,
+          hoursAssigned: task.hoursAssigned,
+          timeSpent: task.timeSpent,
+          blockerReason: task.blockerReason,
+          dependencyTaskIds: task.dependencyTaskIds,
+          isRecurring: task.isRecurring,
+          recurringDays: task.recurringDays,
+          recurringCompletions: task.recurringCompletions,
+          createdAt: task.createdAt,
+        }))
+      ),
+      ...developmentProjects.flatMap((project) =>
+        (developmentTasksByProject[project.id] ?? []).map((task) => ({
+          id: task.id,
+          projectKey: `Development:${project.id}`,
+          projectId: project.id,
+          projectName: project.name,
+          stream: "Development" as const,
+          title: task.title,
+          dueDate: task.dueDate,
+          status: task.status,
+          priority: task.priority,
+          assignee: task.assignee,
+          hoursAssigned: task.hoursAssigned,
+          timeSpent: task.timeSpent,
+          blockerReason: task.blockerReason,
+          dependencyTaskIds: task.dependencyTaskIds,
+          isRecurring: task.isRecurring,
+          recurringDays: task.recurringDays,
+          recurringCompletions: task.recurringCompletions,
+          createdAt: task.createdAt,
+        }))
+      ),
+    ];
+
+    const projectMemberSets = new Map<string, Set<string>>();
+    projects.forEach((project) => {
+      projectMemberSets.set(project.key, new Set<string>());
+    });
+
+    const addMemberToProject = (projectKey: string, name: string | null | undefined) => {
+      const clean = name?.trim();
+      if (!clean) {
+        return;
+      }
+      const target = projectMemberSets.get(projectKey);
+      if (!target) {
+        return;
+      }
+      target.add(clean);
+    };
+
+    marketingProjects.forEach((project) => {
+      const projectKey = `Marketing:${project.id}`;
+      (marketingMembersByProject[project.id] ?? []).forEach((member) => {
+        addMemberToProject(projectKey, member.name);
+      });
+    });
+    developmentProjects.forEach((project) => {
+      const projectKey = `Development:${project.id}`;
+      (developmentMembersByProject[project.id] ?? []).forEach((member) => {
+        addMemberToProject(projectKey, member.name);
+      });
+    });
+    tasks.forEach((task) => {
+      addMemberToProject(task.projectKey, task.assignee);
+    });
+
+    const projectsWithMembers: AiScopedProject[] = projects.map((project) => ({
+      ...project,
+      memberNames: [...(projectMemberSets.get(project.key) ?? new Set<string>())].sort((a, b) =>
+        a.localeCompare(b)
+      ),
+    }));
+
+    const memberNamesSet = new Set<string>();
+    projectsWithMembers.forEach((project) => {
+      project.memberNames.forEach((name) => memberNamesSet.add(name));
+    });
+    loggedPeople.forEach((person) => {
+      const name = person.name.trim();
+      if (name) {
+        memberNamesSet.add(name);
+      }
+    });
+
+    return {
+      today: getTodayIsoDate(),
+      projects: projectsWithMembers,
+      tasks,
+      memberNames: [...memberNamesSet].sort((a, b) => a.localeCompare(b)),
+    };
+  }, [
+    developmentMembersByProject,
+    developmentProjects,
+    developmentTasksByProject,
+    loggedPeople,
+    marketingMembersByProject,
+    marketingProjects,
+    marketingTasksByProject,
+  ]);
+
+  const aiProjectOptions = useMemo(() => {
+    if (aiSelectedMember === "All") {
+      return aiScope.projects;
+    }
+    return aiScope.projects.filter((project) => project.memberNames.includes(aiSelectedMember));
+  }, [aiScope.projects, aiSelectedMember]);
+
+  const aiMemberOptions = useMemo(() => {
+    if (aiSelectedProjectKey === "All") {
+      return aiScope.memberNames;
+    }
+    const selectedProject = aiScope.projects.find((project) => project.key === aiSelectedProjectKey);
+    return selectedProject ? selectedProject.memberNames : aiScope.memberNames;
+  }, [aiScope.memberNames, aiScope.projects, aiSelectedProjectKey]);
+
+  const aiMemberValue = aiMemberOptions.includes(aiSelectedMember) ? aiSelectedMember : "All";
+  const aiProjectValue = aiProjectOptions.some((project) => project.key === aiSelectedProjectKey)
+    ? aiSelectedProjectKey
+    : "All";
+
+  const buildScopedAiSnapshot = (overrides?: {
+    member?: string;
+    projectKey?: string;
+  }): AiScopeSnapshot => {
+    const scopeMember = overrides?.member ?? aiMemberValue;
+    const scopeProjectKey = overrides?.projectKey ?? aiProjectValue;
+
+    const scopedProjects = aiScope.projects.filter((project) => {
+      if (scopeProjectKey !== "All" && project.key !== scopeProjectKey) {
+        return false;
+      }
+      if (scopeMember !== "All" && !project.memberNames.includes(scopeMember)) {
+        return false;
+      }
+      return true;
+    });
+    const scopedProjectKeys = new Set(scopedProjects.map((project) => project.key));
+    const scopedTasks = aiScope.tasks.filter((task) => {
+      if (!scopedProjectKeys.has(task.projectKey)) {
+        return false;
+      }
+      if (scopeMember !== "All" && task.assignee?.trim() !== scopeMember) {
+        return false;
+      }
+      return true;
+    });
+
+    const openTasks = scopedTasks.filter((task) => task.status !== "Done");
+    const overdueTasks = openTasks
+      .filter((task) => isOverdue(task, aiScope.today))
+      .sort((a, b) => (a.dueDate || "9999-99-99").localeCompare(b.dueDate || "9999-99-99"));
+    const dueTodayTasks = openTasks.filter((task) => task.dueDate === aiScope.today);
+    const dueThisWeekTasks = openTasks.filter((task) => {
+      const days = getDaysFromToday(task.dueDate, aiScope.today);
+      return days !== null && days > 0 && days <= 7;
+    });
+    const highPriorityOpen = openTasks.filter((task) => task.priority === "High");
+    const blockedTasks = openTasks.filter(
+      (task) => task.blockerReason.trim().length > 0 || task.dependencyTaskIds.length > 0
+    );
+
+    const selectedProject =
+      scopeProjectKey === "All"
+        ? null
+        : aiScope.projects.find((project) => project.key === scopeProjectKey) ?? null;
+    const scopeMemberLabel = scopeMember === "All" ? "All team members" : scopeMember;
+    const scopeProjectLabel = selectedProject
+      ? `${selectedProject.name} (${selectedProject.stream})`
+      : "All projects";
+
+    const statusCounts: Record<TaskStatus, number> = {
+      "To Do": 0,
+      "In Progress": 0,
+      Review: 0,
+      Done: 0,
+    };
+    scopedTasks.forEach((task) => {
+      statusCounts[task.status] += 1;
+    });
+
+    const toContextTaskRow = (task: UnifiedTask): AiContextTaskRow => ({
+      title: task.title,
+      projectName: task.projectName,
+      stream: task.stream,
+      status: task.status,
+      priority: task.priority,
+      dueDate: task.dueDate,
+      assignee: task.assignee?.trim() || "Unassigned",
+      blocked: Boolean(task.blockerReason.trim()) || task.dependencyTaskIds.length > 0,
+    });
+
+    const topPriorityOpen = openTasks
+      .slice()
+      .sort((a, b) => {
+        const priorityRankA = a.priority === "High" ? 0 : a.priority === "Medium" ? 1 : 2;
+        const priorityRankB = b.priority === "High" ? 0 : b.priority === "Medium" ? 1 : 2;
+        if (priorityRankA !== priorityRankB) {
+          return priorityRankA - priorityRankB;
+        }
+        return (a.dueDate || "9999-99-99").localeCompare(b.dueDate || "9999-99-99");
+      })
+      .slice(0, 8)
+      .map(toContextTaskRow);
+
+    const topOverdue = overdueTasks.slice(0, 8).map(toContextTaskRow);
+    const blockedOpen = blockedTasks
+      .slice()
+      .sort((a, b) => (a.dueDate || "9999-99-99").localeCompare(b.dueDate || "9999-99-99"))
+      .slice(0, 8)
+      .map(toContextTaskRow);
+
+    return {
+      scope: {
+        member: scopeMemberLabel,
+        project: scopeProjectLabel,
+      },
+      summary: {
+        projects: scopedProjects.length,
+        tasks: scopedTasks.length,
+        open: openTasks.length,
+        done: scopedTasks.length - openTasks.length,
+        overdue: overdueTasks.length,
+        dueToday: dueTodayTasks.length,
+        dueThisWeek: dueThisWeekTasks.length,
+        highPriorityOpen: highPriorityOpen.length,
+        blockedOpen: blockedTasks.length,
+      },
+      statusCounts,
+      topOverdue,
+      topPriorityOpen,
+      blockedOpen,
+    };
+  };
+
+  const buildAiAnalysisReply = (question: string): string => {
+    const snapshot = buildScopedAiSnapshot();
+    const actionLines: string[] = [];
+    if (snapshot.summary.overdue > 0) {
+      actionLines.push(
+        `1) Close overdue first: ${snapshot.topOverdue
+          .slice(0, 3)
+          .map((task) => task.title)
+          .join(", ")}.`
+      );
+    }
+    if (snapshot.summary.blockedOpen > 0) {
+      actionLines.push(`2) Resolve blockers/dependencies on ${snapshot.summary.blockedOpen} open tasks.`);
+    }
+    if (snapshot.summary.highPriorityOpen > 0 && snapshot.summary.dueToday === 0) {
+      actionLines.push("3) Pull high-priority open tasks into active execution now.");
+    }
+    if (
+      snapshot.statusCounts["In Progress"] > 0 ||
+      snapshot.statusCounts.Review > 0
+    ) {
+      actionLines.push("4) Push In Progress/Review queue to Done to improve flow.");
+    }
+    if (actionLines.length === 0) {
+      actionLines.push("1) No critical risk detected in this scope. Keep current execution rhythm.");
+    }
+
+    const hotTaskLines =
+      snapshot.topPriorityOpen.length === 0
+        ? ["- No open tasks in this scope."]
+        : snapshot.topPriorityOpen.slice(0, 5).map((task) => {
+            const dateText = task.dueDate ? formatIsoDate(task.dueDate) : "No due date";
+            return `- ${task.title} | ${task.projectName} | ${task.status} | ${task.priority} | ${dateText}`;
+          });
+
+    return [
+      `Scope: ${snapshot.scope.member} | ${snapshot.scope.project}`,
+      `Question: ${question}`,
+      "",
+      "Snapshot",
+      `- Projects in scope: ${snapshot.summary.projects}`,
+      `- Tasks in scope: ${snapshot.summary.tasks} (${snapshot.summary.open} open, ${snapshot.summary.done} done)`,
+      `- Overdue: ${snapshot.summary.overdue} | Due today: ${snapshot.summary.dueToday} | Due this week: ${snapshot.summary.dueThisWeek}`,
+      `- High priority open: ${snapshot.summary.highPriorityOpen} | Blocked/dependency: ${snapshot.summary.blockedOpen}`,
+      "",
+      "Suggested next actions",
+      ...actionLines,
+      "",
+      "Top tasks to review",
+      ...hotTaskLines,
+    ].join("\n");
+  };
+
+  const sendAiPrompt = async (questionOverride?: string) => {
+    const question = (questionOverride ?? aiInput).trim();
+    if (!question || isAiSending) {
+      return;
+    }
+    const userId = `user-${aiMessageCounterRef.current}`;
+    aiMessageCounterRef.current += 1;
+    const assistantId = `assistant-${aiMessageCounterRef.current}`;
+    aiMessageCounterRef.current += 1;
+    setAiInput("");
+    setAiServiceError(null);
+    setAiMessages((previous) => [...previous, { id: userId, role: "user", text: question }]);
+    setIsAiSending(true);
+
+    const snapshot = buildScopedAiSnapshot();
+    let reply = "";
+
+    try {
+      const response = await fetch("/api/admin/ai-analysis", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          question,
+          context: snapshot,
+        }),
+      });
+
+      const payload = (await response.json().catch(() => ({}))) as {
+        answer?: unknown;
+        error?: unknown;
+      };
+
+      if (!response.ok || typeof payload.answer !== "string" || payload.answer.trim().length === 0) {
+        const apiError =
+          typeof payload.error === "string" && payload.error.trim().length > 0
+            ? payload.error
+            : "AI service returned no answer.";
+        throw new Error(apiError);
+      }
+
+      reply = payload.answer.trim();
+    } catch (error) {
+      reply = buildAiAnalysisReply(question);
+      const message =
+        error instanceof Error && error.message
+          ? error.message
+          : "AI service unavailable.";
+      setAiServiceError(message);
+    } finally {
+      setIsAiSending(false);
+      setAiMessages((previous) => [
+        ...previous,
+        { id: assistantId, role: "assistant", text: reply },
+      ]);
+    }
+  };
+
+  const generatePortfolioSummary = async () => {
+    if (isGeneratingSummary) {
+      return;
+    }
+
+    setGeneratedSummaryError(null);
+    setIsGeneratingSummary(true);
+
+    const question =
+      "Generate a concise portfolio summary under 50 words total, covering both Marketing and Development. Include one key risk and one immediate focus.";
+    const context = buildScopedAiSnapshot({
+      member: "All",
+      projectKey: "All",
+    });
+    let summaryText = "";
+
+    try {
+      const response = await fetch("/api/admin/ai-analysis", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          question,
+          context,
+          mode: "compact_summary",
+        }),
+      });
+
+      const payload = (await response.json().catch(() => ({}))) as {
+        answer?: unknown;
+        error?: unknown;
+      };
+
+      if (!response.ok || typeof payload.answer !== "string" || payload.answer.trim().length === 0) {
+        const apiError =
+          typeof payload.error === "string" && payload.error.trim().length > 0
+            ? payload.error
+            : "Summary generation failed.";
+        throw new Error(apiError);
+      }
+
+      summaryText = truncateToWordCount(payload.answer, 50);
+    } catch (error) {
+      const marketing = dashboard.workstreamSummary.Marketing;
+      const development = dashboard.workstreamSummary.Development;
+      summaryText = truncateToWordCount(
+        `Marketing: ${marketing.open} open, ${marketing.overdue} overdue. Development: ${development.open} open, ${development.overdue} overdue. Immediate focus: close overdue backlog and unblock ${dashboard.blockedTasks} blocked tasks.`,
+        50
+      );
+      const message =
+        error instanceof Error && error.message
+          ? error.message
+          : "Summary service unavailable.";
+      setGeneratedSummaryError(message);
+    } finally {
+      setIsGeneratingSummary(false);
+      const generatedAtIso = new Date().toISOString();
+      const id = `summary-${aiMessageCounterRef.current}`;
+      aiMessageCounterRef.current += 1;
+      setGeneratedSummaries((previous) => [
+        { id, generatedAtIso, text: summaryText },
+        ...previous,
+      ]);
+    }
+  };
 
   if (!hydrated) {
     return (
@@ -1066,6 +1593,63 @@ export default function AdminPage() {
             <p className="text-xs text-slate-600">tasks completed</p>
           </div>
         </div>
+      </section>
+
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-base font-semibold text-slate-900">AI Analysis</h2>
+            <p className="text-xs text-slate-500">
+              Generate compact portfolio summaries or open full AI analysis.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                void generatePortfolioSummary();
+              }}
+              disabled={isGeneratingSummary}
+              className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {isGeneratingSummary ? "Generating..." : "Generate summary"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsAiAnalysisModalOpen(true)}
+              className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+            >
+              <Maximize2 className="h-4 w-4" />
+              Open AI module
+            </button>
+          </div>
+        </div>
+
+        {generatedSummaryError && (
+          <p className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+            AI summary unavailable. Showing fallback summary instead. {generatedSummaryError}
+          </p>
+        )}
+
+        {generatedSummaries.length === 0 ? (
+          <p className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+            No summary generated yet.
+          </p>
+        ) : (
+          <div className="max-h-44 space-y-2 overflow-auto pr-1">
+            {generatedSummaries.map((entry) => (
+              <article
+                key={entry.id}
+                className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2"
+              >
+                <p className="text-xs font-medium text-slate-600">
+                  {formatDateTimeWithIndiaLocale(entry.generatedAtIso)}
+                </p>
+                <p className="mt-1 text-sm text-slate-800">{entry.text}</p>
+              </article>
+            ))}
+          </div>
+        )}
       </section>
 
       <div className="grid gap-4 xl:grid-cols-2">
@@ -1304,54 +1888,6 @@ export default function AdminPage() {
 
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
         <div className="mb-4 flex items-center justify-between">
-          <div>
-            <h2 className="text-base font-semibold text-slate-900">People Directory</h2>
-            <p className="text-xs text-slate-500">
-              Expand to review name, position, and internal/external classification.
-            </p>
-          </div>
-          <UserCog className="h-5 w-5 text-slate-500" />
-        </div>
-        {dashboard.peopleDirectoryRows.length === 0 ? (
-          <p className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
-            No people data yet.
-          </p>
-        ) : (
-          <div className="space-y-3">
-            <div className="grid gap-2 sm:grid-cols-3">
-              <article className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                <p className="text-xs uppercase tracking-wide text-slate-500">Total</p>
-                <p className="mt-1 text-lg font-semibold text-slate-900">
-                  {dashboard.peopleDirectoryRows.length}
-                </p>
-              </article>
-              <article className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                <p className="text-xs uppercase tracking-wide text-slate-500">Internal</p>
-                <p className="mt-1 text-lg font-semibold text-slate-900">
-                  {dashboard.internalPeopleCount}
-                </p>
-              </article>
-              <article className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                <p className="text-xs uppercase tracking-wide text-slate-500">External</p>
-                <p className="mt-1 text-lg font-semibold text-slate-900">
-                  {dashboard.externalPeopleCount}
-                </p>
-              </article>
-            </div>
-            <button
-              type="button"
-              onClick={() => setIsPeopleModalOpen(true)}
-              className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
-            >
-              <Maximize2 className="h-4 w-4" />
-              Open people module
-            </button>
-          </div>
-        )}
-      </section>
-
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-        <div className="mb-4 flex items-center justify-between">
           <h2 className="text-base font-semibold text-slate-900">People Performance</h2>
           <UserCog className="h-5 w-5 text-slate-500" />
         </div>
@@ -1507,88 +2043,189 @@ export default function AdminPage() {
         </div>
       )}
 
-      {isPeopleModalOpen && (
+      {isAiAnalysisModalOpen && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4"
-          onClick={() => setIsPeopleModalOpen(false)}
+          onClick={() => setIsAiAnalysisModalOpen(false)}
         >
           <div
-            className="max-h-[90vh] w-full max-w-4xl overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"
+            className="flex h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"
             onClick={(event) => event.stopPropagation()}
           >
             <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
               <div>
-                <h3 className="text-base font-semibold text-slate-900">People Module</h3>
-                <p className="text-xs text-slate-500">
-                  Name, position, and internal/external classification.
-                </p>
+                <h3 className="text-base font-semibold text-slate-900">AI Analysis Module</h3>
+                <p className="text-xs text-slate-500">Chat-style analysis with project and team scoping.</p>
               </div>
               <button
                 type="button"
-                onClick={() => setIsPeopleModalOpen(false)}
+                onClick={() => setIsAiAnalysisModalOpen(false)}
                 className="rounded-md border border-slate-300 p-2 text-slate-600 hover:bg-slate-50"
-                aria-label="Close people module"
+                aria-label="Close AI analysis module"
               >
                 <X className="h-4 w-4" />
               </button>
             </div>
 
-            <div className="grid gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3 sm:grid-cols-3">
-              <article className="rounded-lg border border-slate-200 bg-white p-3">
-                <p className="text-xs uppercase tracking-wide text-slate-500">Total people</p>
-                <p className="mt-1 text-lg font-semibold text-slate-900">
-                  {dashboard.peopleDirectoryRows.length}
-                </p>
-              </article>
-              <article className="rounded-lg border border-slate-200 bg-white p-3">
-                <p className="text-xs uppercase tracking-wide text-slate-500">Internal</p>
-                <p className="mt-1 text-lg font-semibold text-slate-900">
-                  {dashboard.internalPeopleCount}
-                </p>
-              </article>
-              <article className="rounded-lg border border-slate-200 bg-white p-3">
-                <p className="text-xs uppercase tracking-wide text-slate-500">External</p>
-                <p className="mt-1 text-lg font-semibold text-slate-900">
-                  {dashboard.externalPeopleCount}
-                </p>
-              </article>
+            <div className="border-b border-slate-200 bg-slate-50 px-4 py-3">
+              <div className="grid gap-3 lg:grid-cols-2">
+                <label className="space-y-1 text-xs font-medium text-slate-700">
+                  Team member
+                  <select
+                    value={aiMemberValue}
+                    onChange={(event) => {
+                      const nextMember = event.target.value;
+                      setAiSelectedMember(nextMember);
+                      const selectedProject =
+                        aiProjectValue === "All"
+                          ? null
+                          : aiScope.projects.find((project) => project.key === aiProjectValue) ?? null;
+                      if (selectedProject && nextMember !== "All" && !selectedProject.memberNames.includes(nextMember)) {
+                        setAiSelectedProjectKey("All");
+                      }
+                    }}
+                    className="h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-700 outline-none focus:border-slate-500"
+                  >
+                    <option value="All">All</option>
+                    {aiMemberOptions.map((name) => (
+                      <option key={`ai-member:${name}`} value={name}>
+                        {name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="space-y-1 text-xs font-medium text-slate-700">
+                  Project
+                  <select
+                    value={aiProjectValue}
+                    onChange={(event) => {
+                      const nextProject = event.target.value;
+                      setAiSelectedProjectKey(nextProject);
+                      if (nextProject === "All" || aiMemberValue === "All") {
+                        return;
+                      }
+                      const selectedProject = aiScope.projects.find((project) => project.key === nextProject);
+                      if (!selectedProject || !selectedProject.memberNames.includes(aiMemberValue)) {
+                        setAiSelectedMember("All");
+                      }
+                    }}
+                    className="h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-700 outline-none focus:border-slate-500"
+                  >
+                    <option value="All">All</option>
+                    {aiProjectOptions.map((project) => (
+                      <option key={`ai-project:${project.key}`} value={project.key}>
+                        {project.name} ({project.stream})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <p className="mt-2 text-xs text-slate-500">
+                Dropdowns are linked. Changing one updates valid options in the other.
+              </p>
             </div>
 
-            <div className="max-h-[56vh] overflow-auto p-4">
-              {dashboard.peopleDirectoryRows.length === 0 ? (
-                <p className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
-                  No people data yet.
-                </p>
-              ) : (
-                <table className="w-full min-w-[680px] text-left text-sm">
-                  <thead>
-                    <tr className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500">
-                      <th className="pb-2">Name</th>
-                      <th className="pb-2">Position</th>
-                      <th className="pb-2">Type</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {dashboard.peopleDirectoryRows.map((person) => (
-                      <tr key={`people:${person.name}`} className="border-b border-slate-100 text-slate-700">
-                        <td className="py-2 font-medium text-slate-900">{person.name}</td>
-                        <td className="py-2">{person.position}</td>
-                        <td className="py-2">
-                          <span
-                            className={`inline-flex rounded-full border px-2 py-0.5 text-xs font-medium ${
-                              person.memberType === "Internal"
-                                ? "border-blue-200 bg-blue-50 text-blue-700"
-                                : "border-amber-200 bg-amber-50 text-amber-700"
-                            }`}
-                          >
-                            {person.memberType}
-                          </span>
-                        </td>
-                      </tr>
+            <div className="flex-1 overflow-y-auto bg-slate-50 p-4">
+              <div className="mx-auto flex w-full max-w-5xl flex-col gap-4">
+                {aiMessages.length === 0 && !isAiSending && (
+                  <p className="rounded-lg border border-dashed border-slate-300 bg-white px-3 py-2 text-sm text-slate-500">
+                    Start with a quick question below.
+                  </p>
+                )}
+                {aiMessages.map((message) => (
+                  <div
+                    key={message.id}
+                    className={`flex w-full ${message.role === "assistant" ? "justify-start" : "justify-end"}`}
+                  >
+                    <article
+                      className={`max-w-[88%] rounded-xl border px-4 py-3 shadow-sm ${
+                        message.role === "assistant"
+                          ? "border-slate-200 bg-white text-slate-800"
+                          : "border-blue-200 bg-blue-50 text-slate-900"
+                      }`}
+                    >
+                      <div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-slate-500">
+                        {message.role === "assistant" ? (
+                          <>
+                            <Bot className="h-3.5 w-3.5" />
+                            AI analysis
+                          </>
+                        ) : (
+                          <>
+                            <MessageSquare className="h-3.5 w-3.5" />
+                            You
+                          </>
+                        )}
+                      </div>
+                      <p className="whitespace-pre-wrap text-sm leading-relaxed">{message.text}</p>
+                    </article>
+                  </div>
+                ))}
+                {isAiSending && (
+                  <div className="flex w-full justify-start">
+                    <article className="max-w-[88%] rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600 shadow-sm">
+                      AI is analyzing...
+                    </article>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="border-t border-slate-200 bg-white p-4">
+              <div className="mx-auto w-full max-w-5xl">
+                <div className="rounded-xl border border-slate-300 bg-white p-3">
+                  {aiServiceError && (
+                    <p className="mb-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-700">
+                      OpenAI service unavailable. Showing built-in analysis instead. {aiServiceError}
+                    </p>
+                  )}
+                  <div className="mb-2 flex flex-wrap gap-2">
+                    {aiQuickQuestions.map((question) => (
+                      <button
+                        key={`quick-ai:${question.label}`}
+                        type="button"
+                        onClick={() => {
+                          void sendAiPrompt(question.prompt);
+                        }}
+                        disabled={isAiSending}
+                        className="rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {question.label}
+                      </button>
                     ))}
-                  </tbody>
-                </table>
-              )}
+                  </div>
+                  <input
+                    type="text"
+                    value={aiInput}
+                    onChange={(event) => setAiInput(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        void sendAiPrompt();
+                      }
+                    }}
+                    placeholder="Ask AI analysis..."
+                    className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm text-slate-800 outline-none focus:border-slate-400"
+                  />
+                  <div className="mt-2 flex items-center justify-between gap-2">
+                    <p className="text-xs text-slate-500">
+                      Scope: {aiMemberValue} | {aiProjectValue === "All" ? "All projects" : "1 project"}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void sendAiPrompt();
+                      }}
+                      disabled={isAiSending || aiInput.trim().length === 0}
+                      className="inline-flex items-center gap-2 rounded-md bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <SendHorizontal className="h-4 w-4" />
+                      {isAiSending ? "Sending..." : "Send"}
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
