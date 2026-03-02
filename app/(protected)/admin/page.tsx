@@ -208,6 +208,8 @@ type AiCommitRow = {
   stream: Workstream;
   changedBy: string;
   scope: "project" | "task";
+  taskId: string;
+  taskTitle: string;
   action: string;
   field: string;
   fromValue: string;
@@ -247,6 +249,7 @@ type AiMyWorkPreferenceRow = {
 };
 
 type AiScopeSnapshot = {
+  todayIso: string;
   scope: {
     member: string;
     project: string;
@@ -1760,6 +1763,8 @@ export default function AdminPage() {
         stream: "Marketing" as const,
         changedBy: commit.changedBy,
         scope: commit.scope ?? "project",
+        taskId: commit.taskId ?? "",
+        taskTitle: commit.taskTitle ?? "",
         action: commit.action ?? "updated",
         field: commit.field,
         fromValue: commit.fromValue,
@@ -1772,6 +1777,8 @@ export default function AdminPage() {
         stream: "Development" as const,
         changedBy: commit.changedBy,
         scope: commit.scope ?? "project",
+        taskId: commit.taskId ?? "",
+        taskTitle: commit.taskTitle ?? "",
         action: commit.action ?? "updated",
         field: commit.field,
         fromValue: commit.fromValue,
@@ -1831,6 +1838,7 @@ export default function AdminPage() {
       .slice(0, 80);
 
     return {
+      todayIso: today,
       scope: {
         member: scopeMemberLabel,
         project: scopeProjectLabel,

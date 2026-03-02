@@ -57,6 +57,8 @@ type AiCommitRow = {
   stream: "Marketing" | "Development";
   changedBy: string;
   scope: "project" | "task";
+  taskId: string;
+  taskTitle: string;
   action: string;
   field: string;
   fromValue: string;
@@ -96,6 +98,7 @@ type AiMyWorkPreferenceRow = {
 };
 
 type AiScopeSnapshot = {
+  todayIso: string;
   scope: {
     member: string;
     project: string;
@@ -135,6 +138,12 @@ type RequestBody = {
 };
 
 type RequestMode = "structured_analysis" | "compact_summary";
+type QueryIntent =
+  | "overdue_deep_dive"
+  | "weekly_plan"
+  | "today_tasks"
+  | "blocked_dependencies"
+  | "general";
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -224,6 +233,8 @@ function isAiCommitRow(value: unknown): value is AiCommitRow {
     (value.stream === "Marketing" || value.stream === "Development") &&
     typeof value.changedBy === "string" &&
     (value.scope === "project" || value.scope === "task") &&
+    typeof value.taskId === "string" &&
+    typeof value.taskTitle === "string" &&
     typeof value.action === "string" &&
     typeof value.field === "string" &&
     typeof value.fromValue === "string" &&
@@ -288,7 +299,12 @@ function isAiScopeSnapshot(value: unknown): value is AiScopeSnapshot {
     return false;
   }
 
-  if (!isObjectRecord(value.scope) || !isObjectRecord(value.summary) || !isObjectRecord(value.statusCounts)) {
+  if (
+    typeof value.todayIso !== "string" ||
+    !isObjectRecord(value.scope) ||
+    !isObjectRecord(value.summary) ||
+    !isObjectRecord(value.statusCounts)
+  ) {
     return false;
   }
 
@@ -365,10 +381,8 @@ function buildSystemPrompt(): string {
     "- Tasks analyzed: ...",
     "",
     "## Executive Summary",
-    "### Project Narrative",
     "- For each project in scope (max 8): start bullet with project name and describe current work in fluent English using task titles/descriptions.",
     "- Do not include projects with no tasks unless explicitly relevant.",
-    "### Status",
     "- Open tasks, overdue tasks, high-priority open, blocked/dependency open.",
     "- Include overdue age where available (e.g., \"overdue by 3 days\").",
     "- Overall trend: stable / improving / degrading, and WHY using only counts and commit/change signals in context.",
@@ -450,6 +464,359 @@ function buildCompactSummaryUserPrompt(question: string, context: AiScopeSnapsho
 
 function normalizeRequestMode(value: unknown): RequestMode {
   return value === "compact_summary" ? "compact_summary" : "structured_analysis";
+}
+
+function normalizeText(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function getDateMs(value: string): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return null;
+  }
+  const date = new Date(`${value}T00:00:00`);
+  const ms = date.getTime();
+  return Number.isNaN(ms) ? null : ms;
+}
+
+function getDaysFromToday(dueDate: string, todayIso: string): number | null {
+  const dueMs = getDateMs(dueDate);
+  const todayMs = getDateMs(todayIso);
+  if (dueMs === null || todayMs === null) {
+    return null;
+  }
+  return Math.round((dueMs - todayMs) / (24 * 60 * 60 * 1000));
+}
+
+function detectQueryIntent(question: string): QueryIntent {
+  const q = normalizeText(question);
+  if (
+    q.includes("overdue") ||
+    q.includes("past due") ||
+    q.includes("late task") ||
+    q.includes("delayed task")
+  ) {
+    return "overdue_deep_dive";
+  }
+  if (
+    q.includes("this week") ||
+    q.includes("weekly plan") ||
+    q.includes("week plan")
+  ) {
+    return "weekly_plan";
+  }
+  if (
+    q.includes("today") &&
+    (q.includes("task") || q.includes("plan") || q.includes("focus"))
+  ) {
+    return "today_tasks";
+  }
+  if (
+    q.includes("blocker") ||
+    q.includes("dependency") ||
+    q.includes("blocked")
+  ) {
+    return "blocked_dependencies";
+  }
+  return "general";
+}
+
+function isDueDateRelatedField(field: string): boolean {
+  const normalizedField = normalizeText(field);
+  return normalizedField.includes("due") || normalizedField.includes("deadline");
+}
+
+function getTaskDueDateCommits(
+  task: AiContextTaskRow,
+  context: AiScopeSnapshot
+): AiCommitRow[] {
+  const normalizedTaskTitle = normalizeText(task.title);
+  return context.commitsRecent
+    .filter((commit) => {
+      if (commit.stream !== task.stream) {
+        return false;
+      }
+      if (!isDueDateRelatedField(commit.field)) {
+        return false;
+      }
+      if (normalizeText(commit.projectName) !== normalizeText(task.projectName)) {
+        return false;
+      }
+      if (commit.scope === "project") {
+        return true;
+      }
+      if (commit.taskId && commit.taskId === task.id) {
+        return true;
+      }
+      if (commit.taskTitle && normalizeText(commit.taskTitle) === normalizedTaskTitle) {
+        return true;
+      }
+      return false;
+    })
+    .sort((a, b) => Date.parse(b.changedAtIso) - Date.parse(a.changedAtIso));
+}
+
+function formatCommitLine(commit: AiCommitRow): string {
+  const timeLabel = commit.changedAtIndia || commit.changedAtIso || "Unknown time";
+  return `${timeLabel}: ${commit.field} ${commit.fromValue} -> ${commit.toValue} by ${commit.changedBy}`;
+}
+
+function toCompactSentence(value: string, fallback: string): string {
+  const clean = value.replace(/\s+/g, " ").trim();
+  if (!clean) {
+    return fallback;
+  }
+  return clean;
+}
+
+function buildOverdueDeepDiveReport(
+  question: string,
+  context: AiScopeSnapshot
+): string {
+  const overdueTasks = context.tasksDetailed
+    .filter((task) => task.status !== "Done" && task.daysOverdue > 0)
+    .sort((a, b) => {
+      if (b.daysOverdue !== a.daysOverdue) {
+        return b.daysOverdue - a.daysOverdue;
+      }
+      const priorityA = a.priority === "High" ? 0 : a.priority === "Medium" ? 1 : 2;
+      const priorityB = b.priority === "High" ? 0 : b.priority === "Medium" ? 1 : 2;
+      if (priorityA !== priorityB) {
+        return priorityA - priorityB;
+      }
+      return a.title.localeCompare(b.title);
+    });
+
+  const lines: string[] = [
+    "## Overdue Tasks",
+    `- Scope: ${context.scope.member} | ${context.scope.project}`,
+    `- Question: ${question}`,
+    `- Total overdue tasks: ${overdueTasks.length}`,
+  ];
+
+  if (overdueTasks.length === 0) {
+    lines.push("- None right now.");
+    return lines.join("\n");
+  }
+
+  overdueTasks.slice(0, 20).forEach((task, index) => {
+    const dueDateCommits = getTaskDueDateCommits(task, context).slice(0, 3);
+    const dependencyText =
+      task.unresolvedDependencies > 0
+        ? `${task.unresolvedDependencies} unresolved (${task.dependencyTaskIds.join(", ") || "ids unavailable"})`
+        : "None right now";
+    const blockerText = toCompactSentence(task.blockerReason, "None right now");
+    const noteText = toCompactSentence(task.description, "None right now");
+    const commitText =
+      dueDateCommits.length > 0
+        ? dueDateCommits.map((commit) => formatCommitLine(commit)).join(" | ")
+        : "None right now";
+
+    lines.push("");
+    lines.push(
+      `${index + 1}) ${task.title} | ${task.projectName} | ${task.assignee} | ${task.status} | ${task.priority}`
+    );
+    lines.push(`- Overdue by: ${task.daysOverdue} day${task.daysOverdue === 1 ? "" : "s"}`);
+    lines.push(`- Blocker reason: ${blockerText}`);
+    lines.push(`- Dependency delay: ${dependencyText}`);
+    lines.push(`- Task note (description): ${noteText}`);
+    lines.push(`- Due-date/deadline commits: ${commitText}`);
+  });
+
+  return lines.join("\n");
+}
+
+function buildTodayTasksReport(
+  question: string,
+  context: AiScopeSnapshot
+): string {
+  const todayTasks = context.tasksDetailed
+    .filter((task) => task.status !== "Done" && task.dueDate === context.todayIso)
+    .sort((a, b) => {
+      const priorityA = a.priority === "High" ? 0 : a.priority === "Medium" ? 1 : 2;
+      const priorityB = b.priority === "High" ? 0 : b.priority === "Medium" ? 1 : 2;
+      if (priorityA !== priorityB) {
+        return priorityA - priorityB;
+      }
+      return a.title.localeCompare(b.title);
+    });
+
+  const lines: string[] = [
+    "## Today's Tasks",
+    `- Scope: ${context.scope.member} | ${context.scope.project}`,
+    `- Question: ${question}`,
+    `- Date: ${context.todayIso}`,
+    `- Tasks due today: ${todayTasks.length}`,
+  ];
+
+  if (todayTasks.length === 0) {
+    lines.push("- None right now.");
+    return lines.join("\n");
+  }
+
+  todayTasks.slice(0, 20).forEach((task, index) => {
+    const blockerText = toCompactSentence(task.blockerReason, "None right now");
+    const dependencyText =
+      task.unresolvedDependencies > 0
+        ? `${task.unresolvedDependencies} unresolved (${task.dependencyTaskIds.join(", ") || "ids unavailable"})`
+        : "None right now";
+    const noteText = toCompactSentence(task.description, "None right now");
+
+    lines.push("");
+    lines.push(
+      `${index + 1}) ${task.title} | ${task.projectName} | ${task.assignee} | ${task.status} | ${task.priority}`
+    );
+    lines.push(`- Blocker reason: ${blockerText}`);
+    lines.push(`- Dependency delay: ${dependencyText}`);
+    lines.push(`- Task note (description): ${noteText}`);
+  });
+
+  return lines.join("\n");
+}
+
+function buildWeeklyPlanReport(
+  question: string,
+  context: AiScopeSnapshot
+): string {
+  const weeklyTasks = context.tasksDetailed
+    .filter((task) => task.status !== "Done")
+    .filter((task) => {
+      const daysFromToday = getDaysFromToday(task.dueDate, context.todayIso);
+      if (daysFromToday === null) {
+        return false;
+      }
+      return daysFromToday <= 6;
+    })
+    .sort((a, b) => {
+      const aDays = getDaysFromToday(a.dueDate, context.todayIso) ?? 9999;
+      const bDays = getDaysFromToday(b.dueDate, context.todayIso) ?? 9999;
+      if (aDays !== bDays) {
+        return aDays - bDays;
+      }
+      const priorityA = a.priority === "High" ? 0 : a.priority === "Medium" ? 1 : 2;
+      const priorityB = b.priority === "High" ? 0 : b.priority === "Medium" ? 1 : 2;
+      if (priorityA !== priorityB) {
+        return priorityA - priorityB;
+      }
+      return a.title.localeCompare(b.title);
+    });
+
+  const overdueCarryover = weeklyTasks.filter((task) => task.daysOverdue > 0).length;
+  const dueThisWeek = weeklyTasks.filter((task) => task.daysOverdue === 0).length;
+  const lines: string[] = [
+    "## This Week Plan",
+    `- Scope: ${context.scope.member} | ${context.scope.project}`,
+    `- Question: ${question}`,
+    `- Plan window: ${context.todayIso} to +6 days`,
+    `- Overdue carryover tasks: ${overdueCarryover}`,
+    `- Due within this week: ${dueThisWeek}`,
+  ];
+
+  if (weeklyTasks.length === 0) {
+    lines.push("- None right now.");
+    return lines.join("\n");
+  }
+
+  lines.push("");
+  lines.push("### Execution Order");
+  weeklyTasks.slice(0, 20).forEach((task, index) => {
+    const daysFromToday = getDaysFromToday(task.dueDate, context.todayIso);
+    const timingText =
+      daysFromToday === null
+        ? "no due-date evidence"
+        : daysFromToday < 0
+          ? `overdue by ${Math.abs(daysFromToday)} day${Math.abs(daysFromToday) === 1 ? "" : "s"}`
+          : daysFromToday === 0
+            ? "due today"
+            : `due in ${daysFromToday} day${daysFromToday === 1 ? "" : "s"}`;
+    const blockerText = toCompactSentence(task.blockerReason, "None right now");
+    const dependencyText =
+      task.unresolvedDependencies > 0
+        ? `${task.unresolvedDependencies} unresolved (${task.dependencyTaskIds.join(", ") || "ids unavailable"})`
+        : "None right now";
+
+    lines.push(
+      `${index + 1}) ${task.title} | ${task.projectName} | ${task.assignee} | ${task.status} | ${task.priority} | ${timingText}`
+    );
+    lines.push(`- Why now: ${timingText}; assigned ${task.hoursAssigned}h; spent ${task.timeSpent}h.`);
+    lines.push(`- Blocker reason: ${blockerText}`);
+    lines.push(`- Dependency delay: ${dependencyText}`);
+  });
+
+  const matchingPreference =
+    context.scope.member === "All team members"
+      ? null
+      : context.myWorkPreferences.find(
+          (preference) =>
+            normalizeText(preference.userName) === normalizeText(context.scope.member)
+        ) ?? null;
+
+  lines.push("");
+  lines.push("### Personal Queue Signals");
+  if (!matchingPreference) {
+    lines.push("- None right now.");
+  } else {
+    const openTodos = matchingPreference.customTodos.filter((todo) => !todo.done);
+    const openTodoHours = openTodos.reduce((sum, todo) => sum + todo.hours, 0);
+    lines.push(
+      `- Focus list tasks: ${matchingPreference.focusedTaskKeys.length}`
+    );
+    lines.push(
+      `- Personal todos open: ${openTodos.length} (${openTodoHours}h planned)`
+    );
+  }
+
+  return lines.join("\n");
+}
+
+function buildBlockedDependencyReport(
+  question: string,
+  context: AiScopeSnapshot
+): string {
+  const blockedTasks = context.tasksDetailed
+    .filter(
+      (task) =>
+        task.status !== "Done" &&
+        (task.blockerReason.trim().length > 0 || task.unresolvedDependencies > 0)
+    )
+    .sort((a, b) => {
+      if (b.unresolvedDependencies !== a.unresolvedDependencies) {
+        return b.unresolvedDependencies - a.unresolvedDependencies;
+      }
+      if (b.daysOverdue !== a.daysOverdue) {
+        return b.daysOverdue - a.daysOverdue;
+      }
+      return a.title.localeCompare(b.title);
+    });
+
+  const lines: string[] = [
+    "## Blockers And Dependencies",
+    `- Scope: ${context.scope.member} | ${context.scope.project}`,
+    `- Question: ${question}`,
+    `- Blocked/dependency tasks: ${blockedTasks.length}`,
+  ];
+
+  if (blockedTasks.length === 0) {
+    lines.push("- None right now.");
+    return lines.join("\n");
+  }
+
+  blockedTasks.slice(0, 20).forEach((task, index) => {
+    const blockerText = toCompactSentence(task.blockerReason, "None right now");
+    const dependencyText =
+      task.unresolvedDependencies > 0
+        ? `${task.unresolvedDependencies} unresolved (${task.dependencyTaskIds.join(", ") || "ids unavailable"})`
+        : "None right now";
+    lines.push("");
+    lines.push(
+      `${index + 1}) ${task.title} | ${task.projectName} | ${task.assignee} | ${task.status} | ${task.priority}`
+    );
+    lines.push(`- Blocker reason: ${blockerText}`);
+    lines.push(`- Dependency delay: ${dependencyText}`);
+    lines.push(`- Overdue: ${task.daysOverdue > 0 ? `${task.daysOverdue} day(s)` : "None right now"}`);
+  });
+
+  return lines.join("\n");
 }
 
 function extractAssistantText(payload: unknown): string {
@@ -576,6 +943,30 @@ export async function POST(request: Request) {
 
   try {
     const mode = normalizeRequestMode(body.mode);
+    if (mode === "structured_analysis") {
+      const intent = detectQueryIntent(question);
+      if (intent === "overdue_deep_dive") {
+        return NextResponse.json({
+          answer: buildOverdueDeepDiveReport(question, body.context),
+        });
+      }
+      if (intent === "weekly_plan") {
+        return NextResponse.json({
+          answer: buildWeeklyPlanReport(question, body.context),
+        });
+      }
+      if (intent === "today_tasks") {
+        return NextResponse.json({
+          answer: buildTodayTasksReport(question, body.context),
+        });
+      }
+      if (intent === "blocked_dependencies") {
+        return NextResponse.json({
+          answer: buildBlockedDependencyReport(question, body.context),
+        });
+      }
+    }
+
     const answer = await requestOpenAiAnswer(question, body.context, mode);
     return NextResponse.json({ answer });
   } catch (error) {
