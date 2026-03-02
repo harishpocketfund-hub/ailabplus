@@ -88,6 +88,8 @@ import {
   TASK_STATUS_OPTIONS,
   writeDevelopmentTasksForProject,
 } from "@/lib/development-tasks";
+import { fetchUserPreference, saveUserPreference } from "@/lib/preferences-client";
+import { recordTaskAssignmentEvent } from "@/lib/assignment-events-client";
 
 const UNASSIGNED_VALUE = "__UNASSIGNED__";
 const ALL_FILTER_VALUE = "__ALL__";
@@ -97,6 +99,8 @@ const DEVELOPMENT_FILTERS_STORAGE_KEY = "internal-system-development-filters";
 const DEVELOPMENT_TASK_VIEW_STORAGE_KEY = "internal-system-development-task-view";
 const DEVELOPMENT_KANBAN_GROUPS_STORAGE_KEY =
   "internal-system-development-kanban-collapsed-groups";
+const DEVELOPMENT_PROJECT_BOARD_PREFERENCES_NAMESPACE =
+  "development-project-board-preferences";
 const WIP_WARNING_THRESHOLD = 6;
 const ONE_DAY_IN_MS = 24 * 60 * 60 * 1000;
 const TIMELINE_PAST_WINDOW_DAYS = 7;
@@ -387,6 +391,36 @@ const parseTaskViewByProject = (rawValue: string | null): TaskViewByProject => {
   } catch {
     return {};
   }
+};
+
+const parseTaskFiltersByProjectFromPreference = (
+  value: unknown
+): TaskFiltersByProject => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+
+  return parseTaskFiltersByProject(JSON.stringify(value));
+};
+
+const parseTaskViewByProjectFromPreference = (
+  value: unknown
+): TaskViewByProject => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+
+  return parseTaskViewByProject(JSON.stringify(value));
+};
+
+const parseCollapsedKanbanGroupsByProjectFromPreference = (
+  value: unknown
+): CollapsedKanbanGroupsByProject => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+
+  return parseCollapsedKanbanGroupsByProject(JSON.stringify(value));
 };
 
 const toLocalIsoDate = (date: Date): string => {
@@ -995,36 +1029,13 @@ export default function DevelopmentProjectPage() {
   const [deleteConfirmTarget, setDeleteConfirmTarget] =
     useState<DeleteConfirmTarget>(null);
   const [collapsedKanbanGroupsByProject, setCollapsedKanbanGroupsByProject] =
-    useState<CollapsedKanbanGroupsByProject>(() => {
-      if (typeof window === "undefined") {
-        return {};
-      }
-
-      return parseCollapsedKanbanGroupsByProject(
-        window.localStorage.getItem(DEVELOPMENT_KANBAN_GROUPS_STORAGE_KEY)
-      );
-    });
+    useState<CollapsedKanbanGroupsByProject>({});
   const [isHideDoneInBoard, setIsHideDoneInBoard] = useState(false);
   const [isTaskAdvancedFiltersOpen, setIsTaskAdvancedFiltersOpen] = useState(false);
   const [taskFiltersByProject, setTaskFiltersByProject] =
-    useState<TaskFiltersByProject>(() => {
-      if (typeof window === "undefined") {
-        return {};
-      }
-
-      return parseTaskFiltersByProject(
-        window.localStorage.getItem(DEVELOPMENT_FILTERS_STORAGE_KEY)
-      );
-    });
-  const [taskViewByProject, setTaskViewByProject] = useState<TaskViewByProject>(() => {
-    if (typeof window === "undefined") {
-      return {};
-    }
-
-    return parseTaskViewByProject(
-      window.localStorage.getItem(DEVELOPMENT_TASK_VIEW_STORAGE_KEY)
-    );
-  });
+    useState<TaskFiltersByProject>({});
+  const [taskViewByProject, setTaskViewByProject] = useState<TaskViewByProject>({});
+  const [didLoadBoardPreferences, setDidLoadBoardPreferences] = useState(false);
   const [recurringDate, setRecurringDate] = useState(getTodayDateString);
   const [recurringFilters, setRecurringFilters] = useState<RecurringFiltersState>(
     createDefaultRecurringFilters
@@ -1153,33 +1164,77 @@ export default function DevelopmentProjectPage() {
       return;
     }
 
-    window.localStorage.setItem(
-      DEVELOPMENT_FILTERS_STORAGE_KEY,
-      JSON.stringify(taskFiltersByProject)
-    );
-  }, [taskFiltersByProject]);
+    let isMounted = true;
+    const loadBoardPreferences = async () => {
+      const remotePreference = await fetchUserPreference(
+        DEVELOPMENT_PROJECT_BOARD_PREFERENCES_NAMESPACE
+      );
+
+      if (!isMounted) {
+        return;
+      }
+
+      if (remotePreference !== null) {
+        setTaskFiltersByProject(
+          parseTaskFiltersByProjectFromPreference(remotePreference.taskFiltersByProject)
+        );
+        setTaskViewByProject(
+          parseTaskViewByProjectFromPreference(remotePreference.taskViewByProject)
+        );
+        setCollapsedKanbanGroupsByProject(
+          parseCollapsedKanbanGroupsByProjectFromPreference(
+            remotePreference.collapsedKanbanGroupsByProject
+          )
+        );
+      } else {
+        setTaskFiltersByProject(
+          parseTaskFiltersByProject(
+            window.localStorage.getItem(DEVELOPMENT_FILTERS_STORAGE_KEY)
+          )
+        );
+        setTaskViewByProject(
+          parseTaskViewByProject(
+            window.localStorage.getItem(DEVELOPMENT_TASK_VIEW_STORAGE_KEY)
+          )
+        );
+        setCollapsedKanbanGroupsByProject(
+          parseCollapsedKanbanGroupsByProject(
+            window.localStorage.getItem(DEVELOPMENT_KANBAN_GROUPS_STORAGE_KEY)
+          )
+        );
+      }
+
+      setDidLoadBoardPreferences(true);
+    };
+
+    void loadBoardPreferences();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
+    if (!didLoadBoardPreferences || typeof window === "undefined") {
       return;
     }
 
-    window.localStorage.setItem(
-      DEVELOPMENT_TASK_VIEW_STORAGE_KEY,
-      JSON.stringify(taskViewByProject)
-    );
-  }, [taskViewByProject]);
+    const timeoutId = window.setTimeout(() => {
+      void saveUserPreference(DEVELOPMENT_PROJECT_BOARD_PREFERENCES_NAMESPACE, {
+        taskFiltersByProject,
+        taskViewByProject,
+        collapsedKanbanGroupsByProject,
+      });
+    }, 180);
 
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    window.localStorage.setItem(
-      DEVELOPMENT_KANBAN_GROUPS_STORAGE_KEY,
-      JSON.stringify(collapsedKanbanGroupsByProject)
-    );
-  }, [collapsedKanbanGroupsByProject]);
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [
+    collapsedKanbanGroupsByProject,
+    didLoadBoardPreferences,
+    taskFiltersByProject,
+    taskViewByProject,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -1838,6 +1893,41 @@ export default function DevelopmentProjectPage() {
     );
   };
 
+  const trackTaskAssignmentChange = ({
+    taskId,
+    taskTitle,
+    previousAssignee,
+    nextAssignee,
+    previousHoursAssigned,
+    nextHoursAssigned,
+    reason,
+  }: {
+    taskId: string;
+    taskTitle: string;
+    previousAssignee: string | null;
+    nextAssignee: string | null;
+    previousHoursAssigned: number;
+    nextHoursAssigned: number;
+    reason: string;
+  }) => {
+    if (!project) {
+      return;
+    }
+
+    void recordTaskAssignmentEvent({
+      workstream: "development",
+      projectId: project.id,
+      projectName: project.name,
+      taskId,
+      taskTitle,
+      fromAssignee: previousAssignee,
+      toAssignee: nextAssignee,
+      fromHoursAssigned: previousHoursAssigned,
+      toHoursAssigned: nextHoursAssigned,
+      reason,
+    });
+  };
+
   const openTeamEditModal = () => {
     setTeamEditRows(
       members.map((member) => {
@@ -2039,6 +2129,15 @@ export default function DevelopmentProjectPage() {
       if (!previousTask || previousTask.assignee === task.assignee) {
         return count;
       }
+      trackTaskAssignmentChange({
+        taskId: task.id,
+        taskTitle: task.title,
+        previousAssignee: previousTask.assignee,
+        nextAssignee: task.assignee,
+        previousHoursAssigned: previousTask.hoursAssigned,
+        nextHoursAssigned: task.hoursAssigned,
+        reason: "team-update",
+      });
       return count + 1;
     }, 0);
     if (assigneeAdjustedCount > 0) {
@@ -2284,6 +2383,8 @@ export default function DevelopmentProjectPage() {
       return;
     }
     const normalizedBlockerReason = taskBlockerReason.trim();
+    const actorName = readDemoUser()?.name ?? "Unknown user";
+    const assignee = parseAssigneeSelection(taskAssignee);
     const validDependencyTaskIds = [
       ...new Set(
         taskDependencyTaskIds.filter((dependencyTaskId) =>
@@ -2295,12 +2396,15 @@ export default function DevelopmentProjectPage() {
     const newTask: DevelopmentTask = {
       id: createDevelopmentTaskId(),
       createdAt: todayString,
+      assignedByName: assignee ? actorName : null,
+      assignedByUserId: null,
+      assignedAtIso: assignee ? new Date().toISOString() : null,
       title: trimmedTaskTitle,
       description: description.trim(),
       dueDate,
       status: "To Do",
       order: tasksByStatus["To Do"].length,
-      assignee: parseAssigneeSelection(taskAssignee),
+      assignee,
       hoursAssigned: parsedTaskHoursAssigned,
       blockerReason: normalizedBlockerReason,
       dependencyTaskIds: validDependencyTaskIds,
@@ -2317,7 +2421,15 @@ export default function DevelopmentProjectPage() {
     const updatedTasks: DevelopmentTask[] = [...tasks, newTask];
 
     writeProjectTasks(updatedTasks);
-    appendProjectCommitLogs([
+    const creationLogs: Array<{
+      scope?: "project" | "task";
+      action?: string;
+      field: string;
+      fromValue: string;
+      toValue: string;
+      taskId?: string | null;
+      taskTitle?: string | null;
+    }> = [
       {
         scope: "task",
         action: "created",
@@ -2327,7 +2439,39 @@ export default function DevelopmentProjectPage() {
         taskId: newTask.id,
         taskTitle: newTask.title,
       },
-    ]);
+    ];
+    if (newTask.assignee !== null) {
+      creationLogs.push({
+        scope: "task",
+        action: "updated",
+        field: "assignee",
+        fromValue: "Unassigned",
+        toValue: formatTaskAssigneeLabel(newTask.assignee),
+        taskId: newTask.id,
+        taskTitle: newTask.title,
+      });
+    }
+    if (newTask.hoursAssigned > 0) {
+      creationLogs.push({
+        scope: "task",
+        action: "updated",
+        field: "hoursAssigned",
+        fromValue: "0",
+        toValue: String(newTask.hoursAssigned),
+        taskId: newTask.id,
+        taskTitle: newTask.title,
+      });
+    }
+    appendProjectCommitLogs(creationLogs);
+    trackTaskAssignmentChange({
+      taskId: newTask.id,
+      taskTitle: newTask.title,
+      previousAssignee: null,
+      nextAssignee: newTask.assignee,
+      previousHoursAssigned: 0,
+      nextHoursAssigned: newTask.hoursAssigned,
+      reason: "task-created",
+    });
     closeTaskForm();
   };
 
@@ -2598,6 +2742,7 @@ export default function DevelopmentProjectPage() {
     const nextRecurringTimePerOccurrenceHours = modalIsRecurringTask
       ? parsedModalRecurringTimePerOccurrenceHours
       : 0;
+    const actorName = readDemoUser()?.name ?? "Unknown user";
 
     const updatedTasks = tasks.map((task) => {
       if (task.id !== modalTaskId) {
@@ -2605,6 +2750,9 @@ export default function DevelopmentProjectPage() {
       }
 
       const statusChanged = task.status !== modalStatus;
+      const assignmentChanged =
+        task.assignee !== nextAssignee ||
+        task.hoursAssigned !== parsedModalHoursAssigned;
       return {
         ...task,
         title: trimmedTitle,
@@ -2623,6 +2771,11 @@ export default function DevelopmentProjectPage() {
         recurringDays: nextRecurringDays,
         recurringTimePerOccurrenceHours: nextRecurringTimePerOccurrenceHours,
         recurringCompletions: modalRecurringCompletions,
+        assignedByName: assignmentChanged ? actorName : task.assignedByName,
+        assignedByUserId: assignmentChanged ? null : task.assignedByUserId,
+        assignedAtIso: assignmentChanged
+          ? new Date().toISOString()
+          : task.assignedAtIso,
       };
     });
 
@@ -2773,6 +2926,15 @@ export default function DevelopmentProjectPage() {
         : null,
     ].filter((entry) => entry !== null);
     appendProjectCommitLogs(changeLogs);
+    trackTaskAssignmentChange({
+      taskId: previousTask.id,
+      taskTitle: trimmedTitle,
+      previousAssignee: previousTask.assignee,
+      nextAssignee,
+      previousHoursAssigned: previousTask.hoursAssigned,
+      nextHoursAssigned: parsedModalHoursAssigned,
+      reason: "task-modal-edit",
+    });
     closeTaskModal();
   };
 

@@ -9,11 +9,18 @@ const PROTECTED_PREFIXES = [
   "/admin",
   "/profile",
 ];
+const ADMIN_ONLY_PREFIXES = ["/admin", "/team"];
 
 function isProtectedPath(pathname: string): boolean {
   return PROTECTED_PREFIXES.some(
     (protectedPrefix) =>
       pathname === protectedPrefix || pathname.startsWith(`${protectedPrefix}/`)
+  );
+}
+
+function isAdminOnlyPath(pathname: string): boolean {
+  return ADMIN_ONLY_PREFIXES.some(
+    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`)
   );
 }
 
@@ -34,6 +41,9 @@ export async function proxy(request: NextRequest) {
   }
 
   if (sessionUser) {
+    if (isAdminOnlyPath(pathname) && sessionUser.role !== "admin") {
+      return NextResponse.redirect(new URL("/my-work", request.url));
+    }
     return NextResponse.next();
   }
 

@@ -23,10 +23,12 @@ export async function GET() {
 
   return NextResponse.json({
     user: {
+      id: sessionUser.id,
       name: sessionUser.name,
       title: sessionUser.title,
       reportsTo: sessionUser.reportsTo,
       email: sessionUser.email,
+      role: sessionUser.role,
     },
   });
 }

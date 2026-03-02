@@ -47,10 +47,12 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       user: {
+        id: authenticatedUser.id,
         name: authenticatedUser.name,
         title: authenticatedUser.title,
         reportsTo: authenticatedUser.reportsTo,
         email: authenticatedUser.email,
+        role: authenticatedUser.role,
       },
     });
   } catch {

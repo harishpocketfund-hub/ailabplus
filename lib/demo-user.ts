@@ -2,6 +2,7 @@ export type DemoUser = {
   name: string;
   title: string;
   reportsTo: string;
+  role: "admin" | "member";
 };
 
 export const DEMO_USER_STORAGE_KEY = "internal-system-demo-user";
@@ -11,6 +12,7 @@ export const DEMO_USER: DemoUser = {
   name: "John Doe",
   title: "Marketing Member",
   reportsTo: "Jane Manager",
+  role: "member",
 };
 
 export function parseDemoUser(rawUser: string | null): DemoUser | null {
@@ -29,6 +31,7 @@ export function parseDemoUser(rawUser: string | null): DemoUser | null {
         name: parsedUser.name,
         title: parsedUser.title,
         reportsTo: parsedUser.reportsTo,
+        role: parsedUser.role === "admin" ? "admin" : "member",
       };
     }
   } catch {

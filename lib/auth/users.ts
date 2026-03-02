@@ -1,11 +1,19 @@
-import "server-only";
+﻿import "server-only";
 
 import bcrypt from "bcryptjs";
 import { randomUUID } from "crypto";
 import type { SessionUser } from "@/lib/auth/session";
 import { createSupabaseAdminClient } from "@/lib/supabase/server";
 
-type AuthUserRecord = SessionUser & {
+type AppUserRole = "admin" | "member";
+
+type AuthUserRecord = {
+  id: string;
+  email: string;
+  name: string;
+  title: string;
+  reportsTo: string;
+  role: AppUserRole;
   passwordHash: string;
   isActive: boolean;
   lastLoginAt: string | null;
@@ -17,6 +25,7 @@ type AppUserRow = {
   name: string;
   title: string;
   reports_to: string;
+  role: AppUserRole | null;
   password_hash: string;
   is_active: boolean;
   last_login_at: string | null;
@@ -39,6 +48,7 @@ const SEEDED_USERS: Omit<AuthUserRecord, "lastLoginAt">[] = [
     name: "John Doe",
     title: "Marketing Member",
     reportsTo: "Jane Manager",
+    role: "member",
     passwordHash:
       "$2b$12$kHRSQJn.gFacLeV3NOfyb.ZYzmxUpFseeehKu9sQHXGtt/sM7cPpu", // Password@123
     isActive: true,
@@ -49,6 +59,7 @@ const SEEDED_USERS: Omit<AuthUserRecord, "lastLoginAt">[] = [
     name: "Jane Manager",
     title: "Marketing Manager",
     reportsTo: "CEO",
+    role: "member",
     passwordHash:
       "$2b$12$RUOE3U61cNPouIMJowV15uqkXsPiiJ7KnPgmkwQTgvWg2FC80YTyC", // Welcome@123
     isActive: true,
@@ -62,6 +73,10 @@ function normalizeEmail(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function normalizeRole(value: unknown): AppUserRole {
+  return value === "admin" ? "admin" : "member";
+}
+
 function toPublicUser(user: AuthUserRecord): PublicAuthUser {
   return {
     id: user.id,
@@ -69,6 +84,7 @@ function toPublicUser(user: AuthUserRecord): PublicAuthUser {
     name: user.name,
     title: user.title,
     reportsTo: user.reportsTo,
+    role: user.role,
   };
 }
 
@@ -79,6 +95,7 @@ function mapRowToAuthUser(row: AppUserRow): AuthUserRecord {
     name: row.name.trim(),
     title: row.title.trim(),
     reportsTo: row.reports_to.trim(),
+    role: normalizeRole(row.role),
     passwordHash: row.password_hash,
     isActive: row.is_active,
     lastLoginAt: row.last_login_at,
@@ -92,6 +109,7 @@ function toAppUserUpsertPayload(user: Omit<AuthUserRecord, "lastLoginAt">) {
     name: user.name.trim(),
     title: user.title.trim(),
     reports_to: user.reportsTo.trim(),
+    role: user.role,
     password_hash: user.passwordHash,
     is_active: user.isActive,
   };
@@ -120,7 +138,7 @@ async function findUserByEmail(email: string): Promise<AuthUserRecord | null> {
   const { data, error } = await supabase
     .from("app_users")
     .select(
-      "id, email, name, title, reports_to, password_hash, is_active, last_login_at"
+      "id, email, name, title, reports_to, role, password_hash, is_active, last_login_at"
     )
     .eq("email", normalizeEmail(email))
     .maybeSingle();
@@ -141,7 +159,7 @@ async function findUserById(id: string): Promise<AuthUserRecord | null> {
   const { data, error } = await supabase
     .from("app_users")
     .select(
-      "id, email, name, title, reports_to, password_hash, is_active, last_login_at"
+      "id, email, name, title, reports_to, role, password_hash, is_active, last_login_at"
     )
     .eq("id", id)
     .maybeSingle();
@@ -241,6 +259,7 @@ export async function createUserAccount(
     name,
     title,
     reportsTo,
+    role: "member",
     passwordHash,
     isActive: true,
   };
@@ -253,7 +272,7 @@ export async function createUserAccount(
       last_login_at: new Date().toISOString(),
     })
     .select(
-      "id, email, name, title, reports_to, password_hash, is_active, last_login_at"
+      "id, email, name, title, reports_to, role, password_hash, is_active, last_login_at"
     )
     .single();
 
@@ -276,7 +295,7 @@ export async function listLoggedUsers(): Promise<PublicAuthUser[]> {
   const supabase = createSupabaseAdminClient();
   const { data, error } = await supabase
     .from("app_users")
-    .select("id, email, name, title, reports_to")
+    .select("id, email, name, title, reports_to, role")
     .eq("is_active", true)
     .not("last_login_at", "is", null)
     .order("name", { ascending: true });
@@ -291,6 +310,7 @@ export async function listLoggedUsers(): Promise<PublicAuthUser[]> {
     name: user.name,
     title: user.title,
     reportsTo: user.reports_to,
+    role: normalizeRole(user.role),
   }));
 }
 
@@ -301,6 +321,7 @@ export async function recordLoggedUser(user: PublicAuthUser): Promise<void> {
     name: user.name.trim(),
     title: user.title.trim(),
     reportsTo: user.reportsTo.trim(),
+    role: normalizeRole(user.role),
   };
 
   await ensureSeedUsers();
@@ -336,6 +357,7 @@ export async function recordLoggedUser(user: PublicAuthUser): Promise<void> {
     name: normalizedUser.name,
     title: normalizedUser.title,
     reports_to: normalizedUser.reportsTo,
+    role: normalizedUser.role,
     password_hash: placeholderPasswordHash,
     is_active: true,
     last_login_at: lastLoginAt,

@@ -52,8 +52,10 @@ import {
   appendMarketingProjectCommitLogs,
   createIndiaDateTimeLabel,
 } from "@/lib/marketing-project-commits";
+import { fetchUserPreference, saveUserPreference } from "@/lib/preferences-client";
 
 const PROJECT_FILTERS_STORAGE_KEY = "internal-system-marketing-project-filters";
+const PROJECT_FILTERS_PREFERENCES_NAMESPACE = "marketing-project-list-filters";
 const dueSoonDays = 3;
 
 type ProjectDeadlineFilter =
@@ -210,6 +212,16 @@ function parseFilters(rawFilters: string | null): MarketingProjectFilters {
   }
 }
 
+function parseFiltersFromPreference(
+  rawData: unknown
+): MarketingProjectFilters {
+  if (!rawData || typeof rawData !== "object" || Array.isArray(rawData)) {
+    return createDefaultFilters();
+  }
+
+  return parseFilters(JSON.stringify(rawData));
+}
+
 function getProjectUrgency(project: MarketingProject, today: string): ProjectUrgency {
   if (!project.deadline) {
     return { status: "On track", label: "No deadline" };
@@ -320,12 +332,9 @@ export default function MarketingPage() {
   const [newTagInput, setNewTagInput] = useState("");
   const [dateError, setDateError] = useState("");
   const [filters, setFilters] = useState<MarketingProjectFilters>(() => {
-    if (typeof window === "undefined") {
-      return createDefaultFilters();
-    }
-
-    return parseFilters(window.localStorage.getItem(PROJECT_FILTERS_STORAGE_KEY));
+    return createDefaultFilters();
   });
+  const [didLoadFiltersPreference, setDidLoadFiltersPreference] = useState(false);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -342,8 +351,46 @@ export default function MarketingPage() {
       return;
     }
 
-    window.localStorage.setItem(PROJECT_FILTERS_STORAGE_KEY, JSON.stringify(filters));
-  }, [filters]);
+    let isMounted = true;
+    const loadFiltersPreference = async () => {
+      const remotePreference = await fetchUserPreference(
+        PROJECT_FILTERS_PREFERENCES_NAMESPACE
+      );
+
+      if (!isMounted) {
+        return;
+      }
+
+      if (remotePreference !== null) {
+        setFilters(parseFiltersFromPreference(remotePreference));
+      } else {
+        setFilters(
+          parseFilters(window.localStorage.getItem(PROJECT_FILTERS_STORAGE_KEY))
+        );
+      }
+
+      setDidLoadFiltersPreference(true);
+    };
+
+    void loadFiltersPreference();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!didLoadFiltersPreference || typeof window === "undefined") {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void saveUserPreference(PROJECT_FILTERS_PREFERENCES_NAMESPACE, filters);
+    }, 180);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [didLoadFiltersPreference, filters]);
 
   const allTagOptions = useMemo(() => {
     return normalizeTags([

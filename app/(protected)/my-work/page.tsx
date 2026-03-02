@@ -1,10 +1,9 @@
-
+﻿
 "use client";
 
 import Link from "next/link";
 import {
   AlertTriangle,
-  ArrowUpDown,
   BadgeAlert,
   CalendarClock,
   CalendarDays,
@@ -44,7 +43,6 @@ import {
 import {
   getMarketingProjectsServerSnapshot,
   getMarketingProjectsSnapshot,
-  MarketingProject,
   parseMarketingProjects,
   subscribeToMarketingProjects,
 } from "@/lib/marketing-projects";
@@ -78,19 +76,33 @@ import {
   parseDevelopmentTasksByProject,
   subscribeToDevelopmentTasks,
 } from "@/lib/development-tasks";
+import { fetchUserPreference, saveUserPreference } from "@/lib/preferences-client";
+import { recordTaskAssignmentEvent } from "@/lib/assignment-events-client";
+import {
+  createDirectTaskId,
+  parseDirectTasks,
+  type DirectTask,
+} from "@/lib/direct-tasks";
 
 const ALL_FILTER_VALUE = "__ALL__";
 const UNASSIGNED_VALUE = "__UNASSIGNED__";
 const ONE_DAY_IN_MS = 24 * 60 * 60 * 1000;
 const MY_WORK_PREFS_STORAGE_KEY = "internal-system-my-work-preferences";
+const MY_WORK_PREFS_NAMESPACE = "my-work";
+const DIRECT_TASK_PROJECT_ID = "__DIRECT_TASKS__";
 const subscribeToHydration = () => () => {};
 const getHydratedSnapshot = () => true;
 const getHydratedServerSnapshot = () => false;
 
-type MyWorkTab = "overdue" | "today" | "week" | "recurring";
+type MyWorkTab = "all" | "overdue" | "today" | "week" | "recurring";
 type MyWorkStatusFilter = MarketingTaskStatus | typeof ALL_FILTER_VALUE;
 type MyWorkPriorityFilter = MarketingTaskPriority | typeof ALL_FILTER_VALUE;
-type MyWorkQueueSort = "due" | "priority" | "project";
+type MyWorkDueFilter =
+  | typeof ALL_FILTER_VALUE
+  | "overdue"
+  | "today"
+  | "week"
+  | "no_due";
 
 type MyWorkCustomTodo = {
   id: string;
@@ -103,14 +115,25 @@ type MyWorkFilters = {
   search: string;
   status: MyWorkStatusFilter;
   priority: MyWorkPriorityFilter;
-  onlyOpen: boolean;
+  due: MyWorkDueFilter;
   onlyBlocked: boolean;
+  onlyDependent: boolean;
+};
+
+type AssignedByMeFilters = {
+  search: string;
+  status: MyWorkStatusFilter;
+  priority: MyWorkPriorityFilter;
+  due: MyWorkDueFilter;
+  onlyBlocked: boolean;
+  onlyDependent: boolean;
 };
 
 type MyWorkUserPreferences = {
   activeTab: MyWorkTab;
+  assignedByMeTab: MyWorkTab;
   filters: MyWorkFilters;
-  queueSort: MyWorkQueueSort;
+  assignedByMeFilters: AssignedByMeFilters;
   focusedTaskKeys: string[];
   customTodos: MyWorkCustomTodo[];
 };
@@ -119,8 +142,11 @@ type MyWorkPreferencesByUser = Record<string, MyWorkUserPreferences>;
 
 type TaskEntry = {
   key: string;
-  project: MarketingProject;
+  source: "project" | "direct";
   projectId: string;
+  projectName: string;
+  projectHref: string | null;
+  contextLabel: string;
   task: MarketingTask;
   members: MarketingMember[];
 };
@@ -147,24 +173,38 @@ type SummaryAssignedTask = {
   status: MarketingTaskStatus;
 };
 
+type AssignedByMeEntry = TaskEntry;
+
 const createDefaultFilters = (): MyWorkFilters => ({
   search: "",
   status: ALL_FILTER_VALUE,
   priority: ALL_FILTER_VALUE,
-  onlyOpen: false,
+  due: ALL_FILTER_VALUE,
   onlyBlocked: false,
+  onlyDependent: false,
+});
+
+const createDefaultAssignedByMeFilters = (): AssignedByMeFilters => ({
+  search: "",
+  status: ALL_FILTER_VALUE,
+  priority: ALL_FILTER_VALUE,
+  due: ALL_FILTER_VALUE,
+  onlyBlocked: false,
+  onlyDependent: false,
 });
 
 const createDefaultPreferences = (): MyWorkUserPreferences => ({
-  activeTab: "today",
+  activeTab: "all",
+  assignedByMeTab: "all",
   filters: createDefaultFilters(),
-  queueSort: "due",
+  assignedByMeFilters: createDefaultAssignedByMeFilters(),
   focusedTaskKeys: [],
   customTodos: [],
 });
 
 const isMyWorkTab = (value: unknown): value is MyWorkTab => {
   return (
+    value === "all" ||
     value === "overdue" ||
     value === "today" ||
     value === "week" ||
@@ -188,8 +228,140 @@ const isMyWorkPriorityFilter = (
   );
 };
 
-const isMyWorkQueueSort = (value: unknown): value is MyWorkQueueSort => {
-  return value === "due" || value === "priority" || value === "project";
+const isMyWorkDueFilter = (value: unknown): value is MyWorkDueFilter => {
+  return (
+    value === ALL_FILTER_VALUE ||
+    value === "overdue" ||
+    value === "today" ||
+    value === "week" ||
+    value === "no_due"
+  );
+};
+
+const parseMyWorkPreference = (rawValue: unknown): MyWorkUserPreferences => {
+  const defaults = createDefaultPreferences();
+
+  try {
+    if (!rawValue || typeof rawValue !== "object" || Array.isArray(rawValue)) {
+      return defaults;
+    }
+
+    const typedPreference = rawValue as Partial<MyWorkUserPreferences> & {
+      filters?: unknown;
+      assignedByMeFilters?: unknown;
+    };
+
+    const filtersValue =
+      typedPreference.filters &&
+      typeof typedPreference.filters === "object" &&
+      !Array.isArray(typedPreference.filters)
+        ? (typedPreference.filters as Partial<MyWorkFilters>)
+        : {};
+
+    const nextFilters: MyWorkFilters = {
+      search: typeof filtersValue.search === "string" ? filtersValue.search : "",
+      status: isMyWorkStatusFilter(filtersValue.status)
+        ? filtersValue.status
+        : ALL_FILTER_VALUE,
+      priority: isMyWorkPriorityFilter(filtersValue.priority)
+        ? filtersValue.priority
+        : ALL_FILTER_VALUE,
+      due: isMyWorkDueFilter(filtersValue.due)
+        ? filtersValue.due
+        : ALL_FILTER_VALUE,
+      onlyBlocked:
+        typeof filtersValue.onlyBlocked === "boolean"
+          ? filtersValue.onlyBlocked
+          : false,
+      onlyDependent:
+        typeof filtersValue.onlyDependent === "boolean"
+          ? filtersValue.onlyDependent
+          : false,
+    };
+
+    const assignedByMeFiltersValue =
+      typedPreference.assignedByMeFilters &&
+      typeof typedPreference.assignedByMeFilters === "object" &&
+      !Array.isArray(typedPreference.assignedByMeFilters)
+        ? (typedPreference.assignedByMeFilters as Partial<AssignedByMeFilters>)
+        : {};
+
+    const nextAssignedByMeFilters: AssignedByMeFilters = {
+      search:
+        typeof assignedByMeFiltersValue.search === "string"
+          ? assignedByMeFiltersValue.search
+          : "",
+      status: isMyWorkStatusFilter(assignedByMeFiltersValue.status)
+        ? assignedByMeFiltersValue.status
+        : ALL_FILTER_VALUE,
+      priority: isMyWorkPriorityFilter(assignedByMeFiltersValue.priority)
+        ? assignedByMeFiltersValue.priority
+        : ALL_FILTER_VALUE,
+      due: isMyWorkDueFilter(assignedByMeFiltersValue.due)
+        ? assignedByMeFiltersValue.due
+        : ALL_FILTER_VALUE,
+      onlyBlocked:
+        typeof assignedByMeFiltersValue.onlyBlocked === "boolean"
+          ? assignedByMeFiltersValue.onlyBlocked
+          : false,
+      onlyDependent:
+        typeof assignedByMeFiltersValue.onlyDependent === "boolean"
+          ? assignedByMeFiltersValue.onlyDependent
+          : false,
+    };
+
+    const focusedTaskKeys = Array.isArray(typedPreference.focusedTaskKeys)
+      ? typedPreference.focusedTaskKeys.filter(
+          (taskKey): taskKey is string => typeof taskKey === "string"
+        )
+      : [];
+    const customTodos = Array.isArray(typedPreference.customTodos)
+      ? typedPreference.customTodos
+          .map((todo) => {
+            if (!todo || typeof todo !== "object") {
+              return null;
+            }
+
+            const typedTodo = todo as Partial<MyWorkCustomTodo>;
+            if (
+              typeof typedTodo.id !== "string" ||
+              typeof typedTodo.title !== "string"
+            ) {
+              return null;
+            }
+
+            const parsedHours =
+              typeof typedTodo.hours === "number" &&
+              Number.isFinite(typedTodo.hours) &&
+              typedTodo.hours >= 0
+                ? typedTodo.hours
+                : 0;
+
+            return {
+              id: typedTodo.id,
+              title: typedTodo.title,
+              hours: parsedHours,
+              done: typedTodo.done === true,
+            } satisfies MyWorkCustomTodo;
+          })
+          .filter((todo): todo is MyWorkCustomTodo => todo !== null)
+      : [];
+
+    return {
+      activeTab: isMyWorkTab(typedPreference.activeTab)
+        ? typedPreference.activeTab
+        : defaults.activeTab,
+      assignedByMeTab: isMyWorkTab(typedPreference.assignedByMeTab)
+        ? typedPreference.assignedByMeTab
+        : defaults.assignedByMeTab,
+      filters: nextFilters,
+      assignedByMeFilters: nextAssignedByMeFilters,
+      focusedTaskKeys,
+      customTodos,
+    };
+  } catch {
+    return defaults;
+  }
 };
 
 const parseMyWorkPreferencesByUser = (
@@ -205,101 +377,12 @@ const parseMyWorkPreferencesByUser = (
       return {};
     }
 
-    const entries = Object.entries(parsed as Record<string, unknown>).map(
-      ([userName, preferenceValue]) => {
-        const defaults = createDefaultPreferences();
-
-        if (
-          !preferenceValue ||
-          typeof preferenceValue !== "object" ||
-          Array.isArray(preferenceValue)
-        ) {
-          return [userName, defaults] as const;
-        }
-
-        const typedPreference = preferenceValue as Partial<MyWorkUserPreferences> & {
-          filters?: unknown;
-        };
-
-        const filtersValue =
-          typedPreference.filters &&
-          typeof typedPreference.filters === "object" &&
-          !Array.isArray(typedPreference.filters)
-            ? (typedPreference.filters as Partial<MyWorkFilters>)
-            : {};
-
-        const nextFilters: MyWorkFilters = {
-          search:
-            typeof filtersValue.search === "string" ? filtersValue.search : "",
-          status: isMyWorkStatusFilter(filtersValue.status)
-            ? filtersValue.status
-            : ALL_FILTER_VALUE,
-          priority: isMyWorkPriorityFilter(filtersValue.priority)
-            ? filtersValue.priority
-            : ALL_FILTER_VALUE,
-          onlyOpen:
-            typeof filtersValue.onlyOpen === "boolean" ? filtersValue.onlyOpen : false,
-          onlyBlocked:
-            typeof filtersValue.onlyBlocked === "boolean"
-              ? filtersValue.onlyBlocked
-              : false,
-        };
-
-        const focusedTaskKeys = Array.isArray(typedPreference.focusedTaskKeys)
-          ? typedPreference.focusedTaskKeys.filter(
-              (taskKey): taskKey is string => typeof taskKey === "string"
-            )
-          : [];
-        const customTodos = Array.isArray(typedPreference.customTodos)
-          ? typedPreference.customTodos
-              .map((todo) => {
-                if (!todo || typeof todo !== "object") {
-                  return null;
-                }
-
-                const typedTodo = todo as Partial<MyWorkCustomTodo>;
-                if (
-                  typeof typedTodo.id !== "string" ||
-                  typeof typedTodo.title !== "string"
-                ) {
-                  return null;
-                }
-
-                const parsedHours =
-                  typeof typedTodo.hours === "number" &&
-                  Number.isFinite(typedTodo.hours) &&
-                  typedTodo.hours >= 0
-                    ? typedTodo.hours
-                    : 0;
-
-                return {
-                  id: typedTodo.id,
-                  title: typedTodo.title,
-                  hours: parsedHours,
-                  done: typedTodo.done === true,
-                } satisfies MyWorkCustomTodo;
-              })
-              .filter((todo): todo is MyWorkCustomTodo => todo !== null)
-          : [];
-
-        return [
-          userName,
-          {
-            activeTab: isMyWorkTab(typedPreference.activeTab)
-              ? typedPreference.activeTab
-              : defaults.activeTab,
-            filters: nextFilters,
-            queueSort: isMyWorkQueueSort(typedPreference.queueSort)
-              ? typedPreference.queueSort
-              : defaults.queueSort,
-            focusedTaskKeys,
-            customTodos,
-          },
-        ] as const;
-      }
+    return Object.fromEntries(
+      Object.entries(parsed as Record<string, unknown>).map(([userName, preferenceValue]) => [
+        userName,
+        parseMyWorkPreference(preferenceValue),
+      ])
     );
-
-    return Object.fromEntries(entries);
   } catch {
     return {};
   }
@@ -453,7 +536,37 @@ const getDueLabel = (dueDate: string, todayIsoDate: string): string => {
   return `In ${dayDiff} days`;
 };
 
-const matchesFilters = (task: MarketingTask, filters: MyWorkFilters): boolean => {
+const matchesDueFilter = (
+  task: MarketingTask,
+  dueFilter: MyWorkDueFilter,
+  todayIsoDate: string,
+  weekEndIsoDate: string
+): boolean => {
+  if (dueFilter === ALL_FILTER_VALUE) {
+    return true;
+  }
+  if (dueFilter === "overdue") {
+    return Boolean(task.dueDate) && task.dueDate < todayIsoDate;
+  }
+  if (dueFilter === "today") {
+    return task.dueDate === todayIsoDate;
+  }
+  if (dueFilter === "week") {
+    return (
+      Boolean(task.dueDate) &&
+      task.dueDate > todayIsoDate &&
+      task.dueDate <= weekEndIsoDate
+    );
+  }
+  return !task.dueDate;
+};
+
+const matchesFilters = (
+  task: MarketingTask,
+  filters: Pick<MyWorkFilters, "search" | "status" | "priority" | "due">,
+  todayIsoDate: string,
+  weekEndIsoDate: string
+): boolean => {
   const searchQuery = filters.search.trim().toLowerCase();
   if (searchQuery) {
     const searchable = `${task.title} ${task.description}`.toLowerCase();
@@ -470,11 +583,37 @@ const matchesFilters = (task: MarketingTask, filters: MyWorkFilters): boolean =>
     return false;
   }
 
-  if (filters.onlyOpen && task.status === "Done") {
+  if (!matchesDueFilter(task, filters.due, todayIsoDate, weekEndIsoDate)) {
     return false;
   }
 
   return true;
+};
+
+const matchesTab = (
+  task: MarketingTask,
+  tab: MyWorkTab,
+  todayIsoDate: string,
+  weekEndIsoDate: string,
+  todayWeekday: MarketingRecurringWeekday
+): boolean => {
+  if (tab === "all") {
+    return true;
+  }
+  if (tab === "overdue") {
+    return Boolean(task.dueDate) && task.dueDate < todayIsoDate;
+  }
+  if (tab === "today") {
+    return task.dueDate === todayIsoDate;
+  }
+  if (tab === "week") {
+    return (
+      Boolean(task.dueDate) &&
+      task.dueDate > todayIsoDate &&
+      task.dueDate <= weekEndIsoDate
+    );
+  }
+  return isRecurringForDate(task, todayIsoDate, todayWeekday);
 };
 
 const isRecurringForDate = (
@@ -533,19 +672,19 @@ const getFocusReasonLabel = (
 ): string => {
   const bucket = getFocusBucket(task, todayIsoDate, weekEndIsoDate);
   if (bucket === 0) {
-    return "Overdue · High";
+    return "Overdue | High";
   }
   if (bucket === 1) {
     return "Overdue";
   }
   if (bucket === 2) {
-    return "Due today · High";
+    return "Due today | High";
   }
   if (bucket === 3) {
     return "Due today";
   }
   if (bucket === 4) {
-    return "Due this week · High";
+    return "Due this week | High";
   }
   if (bucket === 5) {
     return "Due this week";
@@ -600,14 +739,50 @@ export default function MyWorkPage() {
     rawDevelopmentTasksByProject
   );
 
-  const [activeTab, setActiveTab] = useState<MyWorkTab>("today");
+  const [activeTab, setActiveTab] = useState<MyWorkTab>("all");
+  const [assignedByMeTab, setAssignedByMeTab] = useState<MyWorkTab>("all");
   const [filters, setFilters] = useState<MyWorkFilters>(createDefaultFilters);
+  const [assignedByMeFilters, setAssignedByMeFilters] = useState<AssignedByMeFilters>(
+    createDefaultAssignedByMeFilters
+  );
   const [focusedTaskKeys, setFocusedTaskKeys] = useState<string[]>([]);
   const [customTodos, setCustomTodos] = useState<MyWorkCustomTodo[]>([]);
-  const [queueSort, setQueueSort] = useState<MyWorkQueueSort>("due");
+  const [directTasks, setDirectTasks] = useState<DirectTask[]>([]);
+  const [loggedPeople, setLoggedPeople] = useState<string[]>([]);
+
+  const [isCreateTaskModalOpen, setIsCreateTaskModalOpen] = useState(false);
+  const [createTaskTarget, setCreateTaskTarget] = useState<string>("individual");
+  const [createTaskTitle, setCreateTaskTitle] = useState("");
+  const [createTaskDescription, setCreateTaskDescription] = useState("");
+  const [createTaskDueDate, setCreateTaskDueDate] = useState("");
+  const [createTaskAssignee, setCreateTaskAssignee] = useState<string>(UNASSIGNED_VALUE);
+  const [createTaskHoursAssigned, setCreateTaskHoursAssigned] = useState("0");
+  const [createTaskPriority, setCreateTaskPriority] =
+    useState<MarketingTaskPriority>("Medium");
+  const [createTaskBlockerReason, setCreateTaskBlockerReason] = useState("");
+  const [createTaskDependencyTaskIds, setCreateTaskDependencyTaskIds] = useState<
+    string[]
+  >([]);
+  const [isCreateTaskDependenciesOpen, setIsCreateTaskDependenciesOpen] =
+    useState(false);
+  const [createTaskIsRecurring, setCreateTaskIsRecurring] = useState(false);
+  const [createTaskRecurringDays, setCreateTaskRecurringDays] = useState<
+    MarketingRecurringWeekday[]
+  >([]);
+  const [
+    createTaskRecurringTimePerOccurrenceHours,
+    setCreateTaskRecurringTimePerOccurrenceHours,
+  ] = useState("0");
+  const [isCreateTaskSubtasksEnabled, setIsCreateTaskSubtasksEnabled] =
+    useState(false);
+  const [createTaskSubtasks, setCreateTaskSubtasks] = useState<MarketingSubtask[]>(
+    []
+  );
+  const [newCreateTaskSubtaskTitle, setNewCreateTaskSubtaskTitle] = useState("");
+
   const [newCustomTodoTitle, setNewCustomTodoTitle] = useState("");
   const [newCustomTodoHours, setNewCustomTodoHours] = useState("");
-  const [didLoadPreferences, setDidLoadPreferences] = useState(false);
+  const [loadedPreferencesForUser, setLoadedPreferencesForUser] = useState("");
 
   const [modalTaskKey, setModalTaskKey] = useState<string | null>(null);
   const [modalTaskTitle, setModalTaskTitle] = useState("");
@@ -649,6 +824,16 @@ export default function MyWorkPage() {
     [todayMs]
   );
 
+  const directTaskMembers = useMemo<MarketingMember[]>(() => {
+    return loggedPeople.map((name, index) => ({
+      id: `direct-member-${index}-${name.toLowerCase().replace(/\s+/g, "-")}`,
+      name,
+      hoursAllocated: 0,
+      source: "internal",
+      userId: null,
+    }));
+  }, [loggedPeople]);
+
   const taskEntries = useMemo(() => {
     if (!userName) {
       return [] as TaskEntry[];
@@ -671,16 +856,37 @@ export default function MyWorkPage() {
 
         entries.push({
           key: getTaskKey(projectId, task.id),
-          project,
+          source: "project",
           projectId,
+          projectName: project.name,
+          projectHref: `/marketing/projects/${projectId}`,
+          contextLabel: project.name,
           members,
           task,
         });
       });
     });
 
+    sortTasksInStatus(directTasks).forEach((task) => {
+      if ((task.assignee ?? "").trim().toLowerCase() !== userName.trim().toLowerCase()) {
+        return;
+      }
+
+      const assignedBy = task.assignedByName ?? "Unknown";
+      entries.push({
+        key: getTaskKey(DIRECT_TASK_PROJECT_ID, task.id),
+        source: "direct",
+        projectId: DIRECT_TASK_PROJECT_ID,
+        projectName: `Direct assignment by ${assignedBy}`,
+        projectHref: null,
+        contextLabel: `Direct assignment by ${assignedBy}`,
+        members: directTaskMembers,
+        task,
+      });
+    });
+
     return entries;
-  }, [membersByProject, projects, tasksByProject, userName]);
+  }, [directTaskMembers, directTasks, membersByProject, projects, tasksByProject, userName]);
 
   const summaryAssignedTasks = useMemo(() => {
     const normalizedUserName = userName.trim().toLowerCase();
@@ -688,13 +894,15 @@ export default function MyWorkPage() {
       return [] as SummaryAssignedTask[];
     }
 
-    const summaryTasks: SummaryAssignedTask[] = taskEntries.map((entry) => ({
-      stream: "Marketing",
-      projectId: entry.projectId,
-      projectName: entry.project.name,
-      dueDate: entry.task.dueDate,
-      status: entry.task.status,
-    }));
+    const summaryTasks: SummaryAssignedTask[] = taskEntries
+      .filter((entry) => entry.source === "project")
+      .map((entry) => ({
+        stream: "Marketing" as const,
+        projectId: entry.projectId,
+        projectName: entry.projectName,
+        dueDate: entry.task.dueDate,
+        status: entry.task.status,
+      }));
 
     const developmentProjectById = new Map(
       developmentProjects.map((project) => [project.id, project])
@@ -786,56 +994,361 @@ export default function MyWorkPage() {
     });
   }, [summaryAssignedTasks, todayIsoDate]);
 
+  const assignedByMeEntries = useMemo(() => {
+    const normalizedUserName = userName.trim().toLowerCase();
+    if (!normalizedUserName) {
+      return [] as AssignedByMeEntry[];
+    }
+
+    const projectById = new Map(projects.map((project) => [project.id, project]));
+    const entries: AssignedByMeEntry[] = [];
+
+    Object.entries(tasksByProject).forEach(([projectId, projectTasks]) => {
+      const project = projectById.get(projectId);
+      if (!project) {
+        return;
+      }
+
+      projectTasks.forEach((task) => {
+        if (
+          (task.assignedByName ?? "").trim().toLowerCase() !== normalizedUserName ||
+          !task.assignee ||
+          task.status === "Done"
+        ) {
+          return;
+        }
+
+        entries.push({
+          key: getTaskKey(projectId, task.id),
+          source: "project",
+          projectId,
+          projectName: project.name,
+          projectHref: `/marketing/projects/${projectId}`,
+          contextLabel: project.name,
+          members: membersByProject[projectId] ?? [],
+          task,
+        });
+      });
+    });
+
+    directTasks.forEach((task) => {
+      if (
+        (task.assignedByName ?? "").trim().toLowerCase() !== normalizedUserName ||
+        !task.assignee ||
+        task.status === "Done"
+      ) {
+        return;
+      }
+
+      entries.push({
+        key: getTaskKey(DIRECT_TASK_PROJECT_ID, task.id),
+        source: "direct",
+        projectId: DIRECT_TASK_PROJECT_ID,
+        projectName: "Individual",
+        projectHref: null,
+        contextLabel: `Direct assignment by ${task.assignedByName ?? "Unknown"}`,
+        members: directTaskMembers,
+        task,
+      });
+    });
+
+    return entries.sort((firstEntry, secondEntry) => {
+      if (firstEntry.task.dueDate !== secondEntry.task.dueDate) {
+        return firstEntry.task.dueDate.localeCompare(secondEntry.task.dueDate);
+      }
+      return firstEntry.task.title.localeCompare(secondEntry.task.title);
+    });
+  }, [directTaskMembers, directTasks, membersByProject, projects, tasksByProject, userName]);
+
+  const filteredAssignedByMeEntries = useMemo(() => {
+    const query = assignedByMeFilters.search.trim().toLowerCase();
+
+    return assignedByMeEntries.filter((entry) => {
+      if (entry.task.status === "Done") {
+        return false;
+      }
+      if (query) {
+        const title = entry.task.title.toLowerCase();
+        const description = entry.task.description.toLowerCase();
+        if (!title.includes(query) && !description.includes(query)) {
+          return false;
+        }
+      }
+      if (
+        assignedByMeFilters.status !== ALL_FILTER_VALUE &&
+        entry.task.status !== assignedByMeFilters.status
+      ) {
+        return false;
+      }
+      if (
+        assignedByMeFilters.priority !== ALL_FILTER_VALUE &&
+        entry.task.priority !== assignedByMeFilters.priority
+      ) {
+        return false;
+      }
+      if (
+        !matchesDueFilter(
+          entry.task,
+          assignedByMeFilters.due,
+          todayIsoDate,
+          weekEndIsoDate
+        )
+      ) {
+        return false;
+      }
+      if (
+        assignedByMeFilters.onlyBlocked &&
+        entry.task.blockerReason.trim().length === 0
+      ) {
+        return false;
+      }
+      if (
+        assignedByMeFilters.onlyDependent &&
+        entry.task.dependencyTaskIds.length === 0
+      ) {
+        return false;
+      }
+
+      return true;
+    });
+  }, [
+    assignedByMeEntries,
+    assignedByMeFilters,
+    todayIsoDate,
+    weekEndIsoDate,
+  ]);
+
+  const assignedByMeEntriesByTab = useMemo(() => {
+    const byTab: Record<MyWorkTab, AssignedByMeEntry[]> = {
+      all: [],
+      overdue: [],
+      today: [],
+      week: [],
+      recurring: [],
+    };
+
+    filteredAssignedByMeEntries.forEach((entry) => {
+      byTab.all.push(entry);
+      if (matchesTab(entry.task, "overdue", todayIsoDate, weekEndIsoDate, todayWeekday)) {
+        byTab.overdue.push(entry);
+      }
+      if (matchesTab(entry.task, "today", todayIsoDate, weekEndIsoDate, todayWeekday)) {
+        byTab.today.push(entry);
+      }
+      if (matchesTab(entry.task, "week", todayIsoDate, weekEndIsoDate, todayWeekday)) {
+        byTab.week.push(entry);
+      }
+      if (matchesTab(entry.task, "recurring", todayIsoDate, weekEndIsoDate, todayWeekday)) {
+        byTab.recurring.push(entry);
+      }
+    });
+
+    return byTab;
+  }, [filteredAssignedByMeEntries, todayIsoDate, todayWeekday, weekEndIsoDate]);
+
+  const currentAssignedByMeEntries = useMemo(() => {
+    if (assignedByMeTab === "all") {
+      return assignedByMeEntriesByTab.all;
+    }
+    if (assignedByMeTab === "overdue") {
+      return assignedByMeEntriesByTab.overdue;
+    }
+    if (assignedByMeTab === "today") {
+      return assignedByMeEntriesByTab.today;
+    }
+    if (assignedByMeTab === "week") {
+      return assignedByMeEntriesByTab.week;
+    }
+    return assignedByMeEntriesByTab.recurring;
+  }, [assignedByMeEntriesByTab, assignedByMeTab]);
+
   const taskEntryByKey = useMemo(() => {
-    return new Map(taskEntries.map((entry) => [entry.key, entry]));
-  }, [taskEntries]);
+    return new Map(
+      [...taskEntries, ...assignedByMeEntries].map((entry) => [entry.key, entry])
+    );
+  }, [assignedByMeEntries, taskEntries]);
+
+  const persistDirectTasks = (nextTasks: DirectTask[]) => {
+    void fetch("/api/direct-tasks", {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ tasks: nextTasks }),
+    });
+  };
+
+  const createDirectTask = (task: DirectTask) => {
+    void fetch("/api/direct-tasks", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ task }),
+    });
+  };
+
+  const deleteDirectTask = (taskId: string) => {
+    const searchParams = new URLSearchParams({ id: taskId });
+    void fetch(`/api/direct-tasks?${searchParams.toString()}`, {
+      method: "DELETE",
+    });
+  };
 
   useEffect(() => {
     if (!userName || typeof window === "undefined") {
       return;
     }
 
-    const allPreferences = parseMyWorkPreferencesByUser(
-      window.localStorage.getItem(MY_WORK_PREFS_STORAGE_KEY)
-    );
-    const userPreferences = allPreferences[userName] ?? createDefaultPreferences();
+    let isMounted = true;
 
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setActiveTab(userPreferences.activeTab);
-    setFilters(userPreferences.filters);
-    setFocusedTaskKeys(userPreferences.focusedTaskKeys);
-    setCustomTodos(userPreferences.customTodos);
-    setQueueSort(userPreferences.queueSort);
-    setDidLoadPreferences(true);
+    const loadPreferences = async () => {
+      const remotePreference = await fetchUserPreference(MY_WORK_PREFS_NAMESPACE);
+      let userPreferences =
+        remotePreference !== null
+          ? parseMyWorkPreference(remotePreference)
+          : createDefaultPreferences();
+
+      if (remotePreference === null) {
+        const allPreferences = parseMyWorkPreferencesByUser(
+          window.localStorage.getItem(MY_WORK_PREFS_STORAGE_KEY)
+        );
+        userPreferences = allPreferences[userName] ?? createDefaultPreferences();
+      }
+
+      if (!isMounted) {
+        return;
+      }
+
+      setActiveTab(userPreferences.activeTab);
+      setAssignedByMeTab(userPreferences.assignedByMeTab);
+      setFilters(userPreferences.filters);
+      setAssignedByMeFilters(userPreferences.assignedByMeFilters);
+      setFocusedTaskKeys(userPreferences.focusedTaskKeys);
+      setCustomTodos(userPreferences.customTodos);
+      setLoadedPreferencesForUser(userName);
+    };
+
+    void loadPreferences();
+
+    return () => {
+      isMounted = false;
+    };
   }, [userName]);
 
   useEffect(() => {
-    if (!didLoadPreferences || !userName || typeof window === "undefined") {
+    let isMounted = true;
+
+    const loadLoggedPeople = async () => {
+      try {
+        const response = await fetch("/api/auth/people", {
+          method: "GET",
+          cache: "no-store",
+        });
+        const payload = (await response.json()) as {
+          users?: Array<{ name?: unknown }>;
+        };
+
+        if (!response.ok || !Array.isArray(payload.users)) {
+          if (isMounted) {
+            setLoggedPeople(userName ? [userName] : []);
+          }
+          return;
+        }
+
+        const names = payload.users
+          .map((user) =>
+            typeof user.name === "string" ? user.name.trim() : ""
+          )
+          .filter((name) => name.length > 0);
+        if (userName && !names.includes(userName)) {
+          names.unshift(userName);
+        }
+
+        if (isMounted) {
+          setLoggedPeople([...new Set(names)].sort((a, b) => a.localeCompare(b)));
+        }
+      } catch {
+        if (isMounted) {
+          setLoggedPeople(userName ? [userName] : []);
+        }
+      }
+    };
+
+    void loadLoggedPeople();
+    return () => {
+      isMounted = false;
+    };
+  }, [userName]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadDirectTasks = async () => {
+      try {
+        const response = await fetch("/api/direct-tasks", {
+          method: "GET",
+          cache: "no-store",
+        });
+        const payload = (await response.json()) as {
+          tasks?: unknown;
+        };
+
+        if (!response.ok) {
+          if (isMounted) {
+            setDirectTasks([]);
+          }
+          return;
+        }
+
+        if (isMounted) {
+          setDirectTasks(parseDirectTasks(payload.tasks));
+        }
+      } catch {
+        if (isMounted) {
+          setDirectTasks([]);
+        }
+      }
+    };
+
+    void loadDirectTasks();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      !userName ||
+      loadedPreferencesForUser !== userName ||
+      typeof window === "undefined"
+    ) {
       return;
     }
 
-    const allPreferences = parseMyWorkPreferencesByUser(
-      window.localStorage.getItem(MY_WORK_PREFS_STORAGE_KEY)
-    );
-    allPreferences[userName] = {
+    const nextPreference: MyWorkUserPreferences = {
       activeTab,
+      assignedByMeTab,
       filters,
+      assignedByMeFilters,
       focusedTaskKeys,
       customTodos,
-      queueSort,
     };
+    const timeoutId = window.setTimeout(() => {
+      void saveUserPreference(MY_WORK_PREFS_NAMESPACE, nextPreference);
+    }, 180);
 
-    window.localStorage.setItem(
-      MY_WORK_PREFS_STORAGE_KEY,
-      JSON.stringify(allPreferences)
-    );
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
   }, [
     activeTab,
+    assignedByMeTab,
+    assignedByMeFilters,
     customTodos,
-    didLoadPreferences,
     filters,
     focusedTaskKeys,
-    queueSort,
+    loadedPreferencesForUser,
     userName,
   ]);
 
@@ -888,69 +1401,110 @@ export default function MyWorkPage() {
       });
     });
 
+    const directStatusByTaskId = new Map(
+      directTasks.map((task) => [task.id, task.status] as const)
+    );
+    directTasks.forEach((task) => {
+      const unresolvedDependencies = task.dependencyTaskIds.reduce(
+        (count, dependencyId) => {
+          const dependencyStatus = directStatusByTaskId.get(dependencyId);
+          if (!dependencyStatus || dependencyStatus !== "Done") {
+            return count + 1;
+          }
+          return count;
+        },
+        0
+      );
+
+      counts.set(getTaskKey(DIRECT_TASK_PROJECT_ID, task.id), unresolvedDependencies);
+    });
+
     return counts;
-  }, [tasksByProject]);
+  }, [directTasks, tasksByProject]);
 
   const filteredEntries = useMemo(() => {
     return taskEntries.filter((entry) => {
-      if (!matchesFilters(entry.task, filters)) {
+      if (entry.task.status === "Done") {
         return false;
       }
 
-      if (!filters.onlyBlocked) {
-        return true;
+      if (!matchesFilters(entry.task, filters, todayIsoDate, weekEndIsoDate)) {
+        return false;
       }
 
       const unresolvedDependencies =
         unresolvedDependencyCountByTaskKey.get(entry.key) ?? 0;
-      return (
-        entry.task.status !== "Done" &&
-        (entry.task.blockerReason.trim().length > 0 || unresolvedDependencies > 0)
-      );
+
+      if (filters.onlyBlocked && entry.task.blockerReason.trim().length === 0) {
+        return false;
+      }
+
+      if (filters.onlyDependent && unresolvedDependencies === 0) {
+        return false;
+      }
+
+      return true;
     });
-  }, [filters, taskEntries, unresolvedDependencyCountByTaskKey]);
+  }, [
+    filters,
+    taskEntries,
+    todayIsoDate,
+    unresolvedDependencyCountByTaskKey,
+    weekEndIsoDate,
+  ]);
 
-  const overdueEntries = useMemo(() => {
-    return filteredEntries
-      .filter(
-        (entry) =>
-          Boolean(entry.task.dueDate) &&
-          entry.task.dueDate < todayIsoDate &&
-          entry.task.status !== "Done"
-      )
-      .sort((firstEntry, secondEntry) =>
-        firstEntry.task.dueDate.localeCompare(secondEntry.task.dueDate)
-      );
-  }, [filteredEntries, todayIsoDate]);
+  const sortedFilteredEntries = useMemo(() => {
+    return [...filteredEntries].sort((firstEntry, secondEntry) => {
+      const firstDueDate = firstEntry.task.dueDate || "9999-12-31";
+      const secondDueDate = secondEntry.task.dueDate || "9999-12-31";
+      if (firstDueDate !== secondDueDate) {
+        return firstDueDate.localeCompare(secondDueDate);
+      }
 
-  const todayEntries = useMemo(() => {
-    return filteredEntries
-      .filter((entry) => entry.task.dueDate === todayIsoDate)
-      .sort((firstEntry, secondEntry) =>
-        firstEntry.task.title.localeCompare(secondEntry.task.title)
-      );
-  }, [filteredEntries, todayIsoDate]);
+      const priorityDiff =
+        getPriorityWeight(firstEntry.task.priority) -
+        getPriorityWeight(secondEntry.task.priority);
+      if (priorityDiff !== 0) {
+        return priorityDiff;
+      }
 
-  const weekEntries = useMemo(() => {
-    return filteredEntries
-      .filter(
-        (entry) =>
-          Boolean(entry.task.dueDate) &&
-          entry.task.dueDate > todayIsoDate &&
-          entry.task.dueDate <= weekEndIsoDate
-      )
-      .sort((firstEntry, secondEntry) =>
-        firstEntry.task.dueDate.localeCompare(secondEntry.task.dueDate)
-      );
-  }, [filteredEntries, todayIsoDate, weekEndIsoDate]);
+      return firstEntry.task.title.localeCompare(secondEntry.task.title);
+    });
+  }, [filteredEntries]);
 
-  const recurringEntries = useMemo(() => {
-    return filteredEntries
-      .filter((entry) => isRecurringForDate(entry.task, todayIsoDate, todayWeekday))
-      .sort((firstEntry, secondEntry) =>
-        firstEntry.task.title.localeCompare(secondEntry.task.title)
-      );
-  }, [filteredEntries, todayIsoDate, todayWeekday]);
+  const queueEntriesByTab = useMemo(() => {
+    const byTab: Record<MyWorkTab, TaskEntry[]> = {
+      all: [],
+      overdue: [],
+      today: [],
+      week: [],
+      recurring: [],
+    };
+
+    sortedFilteredEntries.forEach((entry) => {
+      byTab.all.push(entry);
+      if (matchesTab(entry.task, "overdue", todayIsoDate, weekEndIsoDate, todayWeekday)) {
+        byTab.overdue.push(entry);
+      }
+      if (matchesTab(entry.task, "today", todayIsoDate, weekEndIsoDate, todayWeekday)) {
+        byTab.today.push(entry);
+      }
+      if (matchesTab(entry.task, "week", todayIsoDate, weekEndIsoDate, todayWeekday)) {
+        byTab.week.push(entry);
+      }
+      if (matchesTab(entry.task, "recurring", todayIsoDate, weekEndIsoDate, todayWeekday)) {
+        byTab.recurring.push(entry);
+      }
+    });
+
+    return byTab;
+  }, [sortedFilteredEntries, todayIsoDate, todayWeekday, weekEndIsoDate]);
+
+  const allEntries = queueEntriesByTab.all;
+  const overdueEntries = queueEntriesByTab.overdue;
+  const todayEntries = queueEntriesByTab.today;
+  const weekEntries = queueEntriesByTab.week;
+  const recurringEntries = queueEntriesByTab.recurring;
 
   const overdueCount = useMemo(
     () =>
@@ -1051,49 +1605,58 @@ export default function MyWorkPage() {
     );
   }, [totalAssignedHoursOpen, totalTimeSpentOpen]);
 
-  const suggestedFocusEntries = useMemo(() => {
-    return taskEntries
-      .map((entry) => ({
-        entry,
-        bucket: getFocusBucket(entry.task, todayIsoDate, weekEndIsoDate),
-      }))
-      .filter((item) => item.bucket !== 99)
-      .sort((firstItem, secondItem) => {
-        if (firstItem.bucket !== secondItem.bucket) {
-          return firstItem.bucket - secondItem.bucket;
-        }
-
-        const firstDue = firstItem.entry.task.dueDate || "9999-12-31";
-        const secondDue = secondItem.entry.task.dueDate || "9999-12-31";
-        if (firstDue !== secondDue) {
-          return firstDue.localeCompare(secondDue);
-        }
-
-        return firstItem.entry.task.title.localeCompare(secondItem.entry.task.title);
-      })
-      .slice(0, 3)
-      .map((item) => item.entry);
-  }, [taskEntries, todayIsoDate, weekEndIsoDate]);
-
   const focusedTaskEntries = useMemo(() => {
     return focusedTaskKeys
       .map((taskKey) => taskEntryByKey.get(taskKey) ?? null)
-      .filter((entry): entry is TaskEntry => entry !== null);
+      .filter((entry): entry is TaskEntry => entry !== null)
+      .filter((entry) => entry.task.status !== "Done")
+      .sort((firstEntry, secondEntry) => {
+        const firstDueDate = firstEntry.task.dueDate || "9999-12-31";
+        const secondDueDate = secondEntry.task.dueDate || "9999-12-31";
+        if (firstDueDate !== secondDueDate) {
+          return firstDueDate.localeCompare(secondDueDate);
+        }
+        return firstEntry.task.title.localeCompare(secondEntry.task.title);
+      });
   }, [focusedTaskKeys, taskEntryByKey]);
 
-  const focusEntries = useMemo(() => {
-    const manualTaskKeys = new Set(focusedTaskEntries.map((entry) => entry.key));
-    const suggested = suggestedFocusEntries.filter(
-      (entry) => !manualTaskKeys.has(entry.key)
-    );
-    return [...focusedTaskEntries, ...suggested];
-  }, [focusedTaskEntries, suggestedFocusEntries]);
-
   const modalEntry = modalTaskKey ? taskEntryByKey.get(modalTaskKey) ?? null : null;
-  const modalProjectMembers = modalEntry?.members ?? [];
-  const modalProjectTasks = modalEntry ? tasksByProject[modalEntry.projectId] ?? [] : [];
+  const modalProjectTasks = useMemo(() => {
+    if (!modalEntry) {
+      return [] as MarketingTask[];
+    }
+    if (modalEntry.projectId === DIRECT_TASK_PROJECT_ID) {
+      return directTasks;
+    }
+    return tasksByProject[modalEntry.projectId] ?? [];
+  }, [directTasks, modalEntry, tasksByProject]);
   const parsedModalTaskKey = modalTaskKey ? parseTaskKey(modalTaskKey) : null;
   const modalTaskId = parsedModalTaskKey?.taskId ?? null;
+  const modalAssigneeOptions = useMemo(() => {
+    const options = new Set<string>();
+    const modalProjectMembers = modalEntry?.members ?? [];
+
+    modalProjectMembers.forEach((member) => {
+      if (member.name.trim()) {
+        options.add(member.name.trim());
+      }
+    });
+    loggedPeople.forEach((personName) => {
+      if (personName.trim()) {
+        options.add(personName.trim());
+      }
+    });
+    if (userName.trim()) {
+      options.add(userName.trim());
+    }
+    if (modalAssignee !== UNASSIGNED_VALUE && modalAssignee.trim()) {
+      options.add(modalAssignee.trim());
+    }
+
+    return [...options].sort((firstName, secondName) =>
+      firstName.localeCompare(secondName)
+    );
+  }, [loggedPeople, modalAssignee, modalEntry, userName]);
 
   const modalRecurringWeekDates = useMemo(() => {
     if (!modalIsRecurringTask) {
@@ -1108,6 +1671,9 @@ export default function MyWorkPage() {
   }, [currentWeekDates, modalDueDate, modalIsRecurringTask, modalRecurringDays]);
 
   const currentQueueEntries = useMemo(() => {
+    if (activeTab === "all") {
+      return allEntries;
+    }
     if (activeTab === "overdue") {
       return overdueEntries;
     }
@@ -1118,42 +1684,9 @@ export default function MyWorkPage() {
       return weekEntries;
     }
     return recurringEntries;
-  }, [activeTab, overdueEntries, recurringEntries, todayEntries, weekEntries]);
+  }, [activeTab, allEntries, overdueEntries, recurringEntries, todayEntries, weekEntries]);
   const sortedQueueEntries = useMemo(() => {
-    const entries = [...currentQueueEntries];
-
-    if (queueSort === "project") {
-      return entries.sort((firstEntry, secondEntry) => {
-        if (firstEntry.project.name !== secondEntry.project.name) {
-          return firstEntry.project.name.localeCompare(secondEntry.project.name);
-        }
-
-        if (firstEntry.task.dueDate !== secondEntry.task.dueDate) {
-          return firstEntry.task.dueDate.localeCompare(secondEntry.task.dueDate);
-        }
-
-        return firstEntry.task.title.localeCompare(secondEntry.task.title);
-      });
-    }
-
-    if (queueSort === "priority") {
-      return entries.sort((firstEntry, secondEntry) => {
-        const priorityDiff =
-          getPriorityWeight(firstEntry.task.priority) -
-          getPriorityWeight(secondEntry.task.priority);
-        if (priorityDiff !== 0) {
-          return priorityDiff;
-        }
-
-        if (firstEntry.task.dueDate !== secondEntry.task.dueDate) {
-          return firstEntry.task.dueDate.localeCompare(secondEntry.task.dueDate);
-        }
-
-        return firstEntry.task.title.localeCompare(secondEntry.task.title);
-      });
-    }
-
-    return entries.sort((firstEntry, secondEntry) => {
+    return [...currentQueueEntries].sort((firstEntry, secondEntry) => {
       const firstDueDate = firstEntry.task.dueDate || "9999-12-31";
       const secondDueDate = secondEntry.task.dueDate || "9999-12-31";
       if (firstDueDate !== secondDueDate) {
@@ -1169,7 +1702,224 @@ export default function MyWorkPage() {
 
       return firstEntry.task.title.localeCompare(secondEntry.task.title);
     });
-  }, [currentQueueEntries, queueSort]);
+  }, [currentQueueEntries]);
+
+  const createTaskTargetOptions = useMemo(() => {
+    return [
+      { value: "individual", label: "Individual (Direct assignment)" },
+      ...projects.map((project) => ({
+        value: `marketing:${project.id}`,
+        label: `Project: ${project.name}`,
+      })),
+    ];
+  }, [projects]);
+
+  const createTaskTargetProjectId = createTaskTarget.startsWith("marketing:")
+    ? createTaskTarget.slice("marketing:".length)
+    : null;
+
+  const createTaskAssigneeOptions = useMemo(() => {
+    const options = new Set<string>();
+    loggedPeople.forEach((personName) => {
+      if (personName.trim()) {
+        options.add(personName.trim());
+      }
+    });
+    if (userName.trim()) {
+      options.add(userName.trim());
+    }
+    return [...options].sort((firstName, secondName) =>
+      firstName.localeCompare(secondName)
+    );
+  }, [loggedPeople, userName]);
+
+  const createTaskDependencyCandidates = useMemo(() => {
+    if (createTaskTarget === "individual") {
+      return directTasks;
+    }
+
+    if (!createTaskTargetProjectId) {
+      return [] as MarketingTask[];
+    }
+
+    return tasksByProject[createTaskTargetProjectId] ?? [];
+  }, [createTaskTarget, createTaskTargetProjectId, directTasks, tasksByProject]);
+
+  const closeCreateTaskModal = () => {
+    setIsCreateTaskModalOpen(false);
+    setCreateTaskTarget("individual");
+    setCreateTaskTitle("");
+    setCreateTaskDescription("");
+    setCreateTaskDueDate("");
+    setCreateTaskAssignee(UNASSIGNED_VALUE);
+    setCreateTaskHoursAssigned("0");
+    setCreateTaskPriority("Medium");
+    setCreateTaskBlockerReason("");
+    setCreateTaskDependencyTaskIds([]);
+    setIsCreateTaskDependenciesOpen(false);
+    setCreateTaskIsRecurring(false);
+    setCreateTaskRecurringDays([]);
+    setCreateTaskRecurringTimePerOccurrenceHours("0");
+    setIsCreateTaskSubtasksEnabled(false);
+    setCreateTaskSubtasks([]);
+    setNewCreateTaskSubtaskTitle("");
+  };
+
+  const toggleCreateTaskDependency = (taskId: string) => {
+    setCreateTaskDependencyTaskIds((currentTaskIds) =>
+      currentTaskIds.includes(taskId)
+        ? currentTaskIds.filter((currentTaskId) => currentTaskId !== taskId)
+        : [...currentTaskIds, taskId]
+    );
+  };
+
+  const toggleCreateTaskRecurringDay = (day: MarketingRecurringWeekday) => {
+    setCreateTaskRecurringDays((currentDays) =>
+      currentDays.includes(day)
+        ? currentDays.filter((currentDay) => currentDay !== day)
+        : [...currentDays, day]
+    );
+  };
+
+  const addCreateTaskSubtask = () => {
+    const trimmedTitle = newCreateTaskSubtaskTitle.trim();
+    if (!trimmedTitle) {
+      return;
+    }
+
+    setCreateTaskSubtasks((currentSubtasks) => [
+      ...currentSubtasks,
+      {
+        id: createMarketingSubtaskId(),
+        title: trimmedTitle,
+        done: false,
+      },
+    ]);
+    setNewCreateTaskSubtaskTitle("");
+  };
+
+  const toggleCreateTaskSubtask = (subtaskId: string) => {
+    setCreateTaskSubtasks((currentSubtasks) =>
+      currentSubtasks.map((subtask) =>
+        subtask.id === subtaskId ? { ...subtask, done: !subtask.done } : subtask
+      )
+    );
+  };
+
+  const removeCreateTaskSubtask = (subtaskId: string) => {
+    setCreateTaskSubtasks((currentSubtasks) =>
+      currentSubtasks.filter((subtask) => subtask.id !== subtaskId)
+    );
+  };
+
+  const submitCreateTask = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    const trimmedTitle = createTaskTitle.trim();
+    if (!trimmedTitle || !createTaskDueDate) {
+      return;
+    }
+    const parsedHoursAssigned = Number(createTaskHoursAssigned);
+    if (!Number.isFinite(parsedHoursAssigned) || parsedHoursAssigned < 0) {
+      return;
+    }
+    const parsedRecurringHours = Number(createTaskRecurringTimePerOccurrenceHours);
+    if (!Number.isFinite(parsedRecurringHours) || parsedRecurringHours < 0) {
+      return;
+    }
+
+    const resolvedAssignee =
+      createTaskAssignee === UNASSIGNED_VALUE || !createTaskAssignee
+        ? userName
+        : createTaskAssignee;
+    const validDependencyTaskIds = [...new Set(createTaskDependencyTaskIds)];
+    const recurringDays = createTaskIsRecurring ? createTaskRecurringDays : [];
+    const recurringTimePerOccurrenceHours = createTaskIsRecurring
+      ? parsedRecurringHours
+      : 0;
+    const subtasks = isCreateTaskSubtasksEnabled ? createTaskSubtasks : [];
+    const nowIso = new Date().toISOString();
+
+    if (createTaskTarget === "individual") {
+      const newDirectTask: DirectTask = {
+        id: createDirectTaskId(),
+        createdAt: todayIsoDate,
+        assignedByName: userName || null,
+        assignedByUserId: null,
+        assignedAtIso: nowIso,
+        title: trimmedTitle,
+        description: createTaskDescription.trim(),
+        dueDate: createTaskDueDate,
+        status: "To Do",
+        order: directTasks.filter((task) => task.status === "To Do").length,
+        assignee: resolvedAssignee || null,
+        hoursAssigned: parsedHoursAssigned,
+        blockerReason: createTaskBlockerReason.trim(),
+        dependencyTaskIds: validDependencyTaskIds,
+        timeSpent: 0,
+        priority: createTaskPriority,
+        subtasks,
+        isRecurring: createTaskIsRecurring,
+        recurringDays,
+        recurringTimePerOccurrenceHours,
+        recurringCompletions: {},
+      };
+
+      setDirectTasks((currentTasks) => [newDirectTask, ...currentTasks]);
+      createDirectTask(newDirectTask);
+      closeCreateTaskModal();
+      return;
+    }
+
+    if (!createTaskTargetProjectId) {
+      return;
+    }
+
+    const nextTask: MarketingTask = {
+      id: `task-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      createdAt: todayIsoDate,
+      assignedByName: resolvedAssignee ? userName : null,
+      assignedByUserId: null,
+      assignedAtIso: resolvedAssignee ? nowIso : null,
+      title: trimmedTitle,
+      description: createTaskDescription.trim(),
+      dueDate: createTaskDueDate,
+      status: "To Do",
+      order: (tasksByProject[createTaskTargetProjectId] ?? []).filter(
+        (task) => task.status === "To Do"
+      ).length,
+      assignee: resolvedAssignee || null,
+      hoursAssigned: parsedHoursAssigned,
+      blockerReason: createTaskBlockerReason.trim(),
+      dependencyTaskIds: validDependencyTaskIds,
+      timeSpent: 0,
+      priority: createTaskPriority,
+      subtasks,
+      isRecurring: createTaskIsRecurring,
+      recurringDays,
+      recurringTimePerOccurrenceHours,
+      recurringCompletions: {},
+    };
+
+    const projectTasks = tasksByProject[createTaskTargetProjectId] ?? [];
+    writeMarketingTasksForProject(createTaskTargetProjectId, [...projectTasks, nextTask]);
+    const projectName =
+      projects.find((project) => project.id === createTaskTargetProjectId)?.name ??
+      createTaskTargetProjectId;
+    void recordTaskAssignmentEvent({
+      workstream: "marketing",
+      projectId: createTaskTargetProjectId,
+      projectName,
+      taskId: nextTask.id,
+      taskTitle: nextTask.title,
+      fromAssignee: null,
+      toAssignee: nextTask.assignee,
+      fromHoursAssigned: 0,
+      toHoursAssigned: nextTask.hoursAssigned,
+      reason: "my-work-create-task",
+    });
+    closeCreateTaskModal();
+  };
 
   const openQueueTab = (tab: MyWorkTab) => {
     setActiveTab(tab);
@@ -1184,19 +1934,45 @@ export default function MyWorkPage() {
     projectId: string,
     updater: (tasks: MarketingTask[]) => MarketingTask[]
   ) => {
+    if (projectId === DIRECT_TASK_PROJECT_ID) {
+      setDirectTasks((currentDirectTasks) => {
+        const previousById = new Map(
+          currentDirectTasks.map((task) => [task.id, task] as const)
+        );
+        const nextTasks = updater(currentDirectTasks).map((task) => ({
+          ...task,
+          assignedByName: previousById.get(task.id)?.assignedByName ?? task.assignedByName,
+          assignedByUserId:
+            previousById.get(task.id)?.assignedByUserId ?? task.assignedByUserId,
+          assignedAtIso: previousById.get(task.id)?.assignedAtIso ?? task.assignedAtIso,
+        }));
+        const nextTaskIdSet = new Set(nextTasks.map((task) => task.id));
+        currentDirectTasks.forEach((task) => {
+          if (!nextTaskIdSet.has(task.id)) {
+            deleteDirectTask(task.id);
+          }
+        });
+        persistDirectTasks(nextTasks);
+        return nextTasks;
+      });
+      return;
+    }
+
     const currentTasks = tasksByProject[projectId] ?? [];
     writeMarketingTasksForProject(projectId, updater(currentTasks));
-  };
-
-  const moveTaskToFocus = (taskKey: string) => {
-    setFocusedTaskKeys((currentKeys) =>
-      currentKeys.includes(taskKey) ? currentKeys : [...currentKeys, taskKey]
-    );
   };
 
   const removeTaskFromFocus = (taskKey: string) => {
     setFocusedTaskKeys((currentKeys) =>
       currentKeys.filter((currentKey) => currentKey !== taskKey)
+    );
+  };
+
+  const toggleTaskFocus = (taskKey: string) => {
+    setFocusedTaskKeys((currentKeys) =>
+      currentKeys.includes(taskKey)
+        ? currentKeys.filter((currentKey) => currentKey !== taskKey)
+        : [...currentKeys, taskKey]
     );
   };
 
@@ -1410,6 +2186,24 @@ export default function MyWorkPage() {
     const parsedTimeSpent = Number(modalTimeSpent);
     const parsedRecurringHours = Number(modalRecurringTimePerOccurrenceHours);
     const normalizedBlockerReason = modalBlockerReason.trim();
+    const nextAssignee = modalAssignee === UNASSIGNED_VALUE ? null : modalAssignee;
+    const currentProjectTasks = tasksByProject[parsedKey.projectId] ?? [];
+    const isDirectTask = parsedKey.projectId === DIRECT_TASK_PROJECT_ID;
+    const previousTask = currentProjectTasks.find(
+      (task) => task.id === parsedKey.taskId
+    );
+    const previousDirectTask = directTasks.find(
+      (task) => task.id === parsedKey.taskId
+    );
+    const currentTask = isDirectTask ? previousDirectTask : previousTask;
+    if (!currentTask) {
+      return;
+    }
+    const projectName =
+      isDirectTask
+        ? `Direct assignment by ${currentTask.assignedByName ?? "Unknown"}`
+        : projects.find((project) => project.id === parsedKey.projectId)?.name ??
+          parsedKey.projectId;
 
     if (!trimmedTitle || !modalDueDate) {
       return;
@@ -1423,6 +2217,10 @@ export default function MyWorkPage() {
     if (!Number.isFinite(parsedRecurringHours) || parsedRecurringHours < 0) {
       return;
     }
+    const assignmentChanged =
+      currentTask.assignee !== nextAssignee ||
+      currentTask.hoursAssigned !== parsedHoursAssigned;
+    const nowIso = new Date().toISOString();
 
     updateProjectTasks(parsedKey.projectId, (projectTasks) => {
       const targetTask = projectTasks.find((task) => task.id === parsedKey.taskId);
@@ -1451,7 +2249,7 @@ export default function MyWorkPage() {
               dueDate: modalDueDate,
               status: modalStatus,
               order: nextOrder,
-              assignee: modalAssignee === UNASSIGNED_VALUE ? null : modalAssignee,
+              assignee: nextAssignee,
               hoursAssigned: parsedHoursAssigned,
               blockerReason: normalizedBlockerReason,
               dependencyTaskIds: validDependencyTaskIds,
@@ -1466,10 +2264,28 @@ export default function MyWorkPage() {
               recurringCompletions: modalIsRecurringTask
                 ? modalRecurringCompletions
                 : {},
+              assignedByName: assignmentChanged ? userName : targetTask.assignedByName,
+              assignedByUserId: assignmentChanged ? null : targetTask.assignedByUserId,
+              assignedAtIso: assignmentChanged ? nowIso : targetTask.assignedAtIso,
             }
           : task
       );
     });
+
+    if (!isDirectTask) {
+      void recordTaskAssignmentEvent({
+        workstream: "marketing",
+        projectId: parsedKey.projectId,
+        projectName,
+        taskId: currentTask.id,
+        taskTitle: trimmedTitle,
+        fromAssignee: currentTask.assignee,
+        toAssignee: nextAssignee,
+        fromHoursAssigned: currentTask.hoursAssigned,
+        toHoursAssigned: parsedHoursAssigned,
+        reason: "my-work-modal-edit",
+      });
+    }
 
     closeTaskModal();
   };
@@ -1541,7 +2357,14 @@ export default function MyWorkPage() {
     setFilters(createDefaultFilters());
   };
 
+  const clearAssignedByMeFilters = () => {
+    setAssignedByMeFilters(createDefaultAssignedByMeFilters());
+  };
+
   const getEmptyMessage = (tab: MyWorkTab): string => {
+    if (tab === "all") {
+      return "No open tasks match the current filters.";
+    }
     if (tab === "overdue") {
       return "No overdue tasks. Keep it going.";
     }
@@ -1574,11 +2397,21 @@ export default function MyWorkPage() {
               {user.name} Command Center
             </h1>
             <p className="mt-1 text-sm text-slate-600">
-              {todayIsoDate} · {openAssignedCount} open items · {blockedCount} blocked
+              {todayIsoDate} | {openAssignedCount} open items | {blockedCount} blocked
             </p>
           </div>
-          <div className="rounded-lg border border-slate-200 bg-white/90 px-3 py-2 text-xs text-slate-600">
-            Prioritize overdue/high-priority work first, then pull from this week.
+          <div className="flex flex-col items-stretch gap-2">
+            <button
+              type="button"
+              onClick={() => setIsCreateTaskModalOpen(true)}
+              className="inline-flex items-center justify-center gap-1 rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              Create task
+            </button>
+            <div className="rounded-lg border border-slate-200 bg-white/90 px-3 py-2 text-xs text-slate-600">
+              Prioritize overdue/high-priority work first, then pull from this week.
+            </div>
           </div>
         </div>
 
@@ -1674,17 +2507,17 @@ export default function MyWorkPage() {
             <div className="mb-3 flex items-center justify-between gap-3">
               <h2 className="text-lg font-semibold">Focus now</h2>
               <span className="text-xs text-slate-500">
-                {focusEntries.length} task{focusEntries.length === 1 ? "" : "s"}
+                {focusedTaskEntries.length} task
+                {focusedTaskEntries.length === 1 ? "" : "s"}
               </span>
             </div>
-            {focusEntries.length === 0 ? (
+            {focusedTaskEntries.length === 0 ? (
               <p className="rounded-md border border-dashed border-slate-300 p-4 text-sm text-slate-600">
-                No urgent focus tasks right now.
+                No tasks in focus yet. Add from Work queue.
               </p>
             ) : (
               <div className="space-y-3">
-                {focusEntries.map((entry) => {
-                  const isManualFocus = focusedTaskKeys.includes(entry.key);
+                {focusedTaskEntries.map((entry) => {
                   const unresolvedDependencies =
                     unresolvedDependencyCountByTaskKey.get(entry.key) ?? 0;
                   const hasBlocker = entry.task.blockerReason.trim().length > 0;
@@ -1693,24 +2526,28 @@ export default function MyWorkPage() {
                       key={entry.key}
                       className={`rounded-lg border p-3 shadow-sm ${
                         entry.task.dueDate < todayIsoDate && entry.task.status !== "Done"
-                          ? "border-red-200 bg-red-50/40"
-                          : "border-slate-200 bg-white"
+                          ? "border-red-200 bg-red-50/30"
+                          : "border-emerald-200 bg-emerald-50/40"
                       }`}
                     >
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <p className="truncate font-semibold text-slate-900">{entry.task.title}</p>
-                          <Link
-                            href={`/marketing/projects/${entry.projectId}`}
-                            className="mt-0.5 inline-block text-xs text-blue-700 hover:underline"
-                          >
-                            {entry.project.name}
-                          </Link>
+                          {entry.projectHref ? (
+                            <Link
+                              href={entry.projectHref}
+                              className="mt-0.5 inline-block text-xs text-blue-700 hover:underline"
+                            >
+                              {entry.projectName}
+                            </Link>
+                          ) : (
+                            <p className="mt-0.5 text-xs text-slate-600">{entry.contextLabel}</p>
+                          )}
                           <p className="mt-1 text-xs text-slate-600">
-                            {entry.task.dueDate || "No due date"} · {getDueLabel(entry.task.dueDate, todayIsoDate)}
+                            {entry.task.dueDate || "No due date"} | {getDueLabel(entry.task.dueDate, todayIsoDate)}
                           </p>
                           <p className="mt-1 text-xs text-slate-600">
-                            Time spent {formatHours(entry.task.timeSpent)} · Allocated{" "}
+                            Time spent {formatHours(entry.task.timeSpent)} | Allocated{" "}
                             {formatHours(entry.task.hoursAssigned)}
                           </p>
                           <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -1732,22 +2569,20 @@ export default function MyWorkPage() {
                                 {unresolvedDependencies === 1 ? "" : "ies"} open
                               </span>
                             ) : null}
-                            <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-[11px] text-slate-700">
-                              {isManualFocus ? "Manual focus" : "Suggested"}
+                            <span className="rounded-full border border-emerald-200 bg-emerald-100 px-2 py-0.5 text-[11px] text-emerald-700">
+                              In focus
                             </span>
                           </div>
                         </div>
-                        {isManualFocus ? (
-                          <button
-                            type="button"
-                            onClick={() => removeTaskFromFocus(entry.key)}
-                            className="rounded border border-slate-200 p-1.5 text-slate-600 hover:bg-slate-100"
-                            title="Remove from focus"
-                            aria-label="Remove from focus"
-                          >
-                            <X className="h-4 w-4" />
-                          </button>
-                        ) : null}
+                        <button
+                          type="button"
+                          onClick={() => removeTaskFromFocus(entry.key)}
+                          className="rounded border border-emerald-200 bg-emerald-100 p-1.5 text-emerald-700 hover:bg-emerald-200"
+                          title="Remove from focus"
+                          aria-label="Remove from focus"
+                        >
+                          <X className="h-4 w-4" />
+                        </button>
                       </div>
                       <div className="mt-3 flex flex-wrap items-center gap-2">
                         <span
@@ -1771,16 +2606,14 @@ export default function MyWorkPage() {
                         >
                           Open
                         </button>
-                        {!isManualFocus ? (
-                          <button
-                            type="button"
-                            onClick={() => moveTaskToFocus(entry.key)}
-                            className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100"
-                          >
-                            <Target className="h-3.5 w-3.5" />
-                            Focus
-                          </button>
-                        ) : null}
+                        <button
+                          type="button"
+                          onClick={() => removeTaskFromFocus(entry.key)}
+                          className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-100 px-2.5 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-200"
+                        >
+                          <Target className="h-3.5 w-3.5" />
+                          Remove focus
+                        </button>
                         {entry.task.status !== "Done" ? (
                           <button
                             type="button"
@@ -1806,16 +2639,12 @@ export default function MyWorkPage() {
               <div>
                 <h2 className="text-lg font-semibold">Work queue</h2>
                 <p className="text-xs text-slate-500">
-                  {sortedQueueEntries.length} visible · sorted by{" "}
-                  {queueSort === "due"
-                    ? "due date"
-                    : queueSort === "priority"
-                      ? "priority"
-                      : "project"}
+                  {sortedQueueEntries.length} visible
                 </p>
               </div>
               <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">
                 {([
+                  { id: "all", label: "All", count: allEntries.length },
                   { id: "overdue", label: "Overdue", count: overdueEntries.length },
                   { id: "today", label: "Today", count: todayEntries.length },
                   { id: "week", label: "This week", count: weekEntries.length },
@@ -1889,6 +2718,56 @@ export default function MyWorkPage() {
                   </option>
                 ))}
               </select>
+              <select
+                value={filters.due}
+                onChange={(event) =>
+                  setFilters((currentFilters) => ({
+                    ...currentFilters,
+                    due: event.target.value as MyWorkDueFilter,
+                  }))
+                }
+                className="h-8 w-[130px] rounded-md border border-slate-200 bg-white px-2 text-sm"
+              >
+                <option value={ALL_FILTER_VALUE}>Due</option>
+                <option value="overdue">Overdue</option>
+                <option value="today">Today</option>
+                <option value="week">This week</option>
+                <option value="no_due">No due</option>
+              </select>
+              <details className="group relative">
+                <summary className="inline-flex h-8 list-none items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-xs text-slate-700 hover:bg-slate-100">
+                  More filters
+                  <ChevronDown className="h-3.5 w-3.5 text-slate-400 group-open:rotate-180" />
+                </summary>
+                <div className="absolute right-0 z-20 mt-1 w-44 rounded-md border border-slate-200 bg-white p-2 shadow-lg">
+                  <label className="mb-2 inline-flex items-center gap-1.5 text-xs text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={filters.onlyBlocked}
+                      onChange={(event) =>
+                        setFilters((currentFilters) => ({
+                          ...currentFilters,
+                          onlyBlocked: event.target.checked,
+                        }))
+                      }
+                    />
+                    Blocked only
+                  </label>
+                  <label className="inline-flex items-center gap-1.5 text-xs text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={filters.onlyDependent}
+                      onChange={(event) =>
+                        setFilters((currentFilters) => ({
+                          ...currentFilters,
+                          onlyDependent: event.target.checked,
+                        }))
+                      }
+                    />
+                    Dependencies
+                  </label>
+                </div>
+              </details>
               <button
                 type="button"
                 onClick={clearFilters}
@@ -1896,46 +2775,6 @@ export default function MyWorkPage() {
               >
                 Clear
               </button>
-              <label className="inline-flex h-8 items-center gap-1.5 rounded-full border border-slate-300 bg-white px-2.5 text-xs text-slate-700">
-                <input
-                  type="checkbox"
-                  checked={filters.onlyOpen}
-                  onChange={(event) =>
-                    setFilters((currentFilters) => ({
-                      ...currentFilters,
-                      onlyOpen: event.target.checked,
-                    }))
-                  }
-                />
-                Open only
-              </label>
-              <label className="inline-flex h-8 items-center gap-1.5 rounded-full border border-slate-300 bg-white px-2.5 text-xs text-slate-700">
-                <input
-                  type="checkbox"
-                  checked={filters.onlyBlocked}
-                  onChange={(event) =>
-                    setFilters((currentFilters) => ({
-                      ...currentFilters,
-                      onlyBlocked: event.target.checked,
-                    }))
-                  }
-                />
-                Blocked only
-              </label>
-              <label className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 text-xs text-slate-700">
-                <ArrowUpDown className="h-3.5 w-3.5 text-slate-400" />
-                <select
-                  value={queueSort}
-                  onChange={(event) =>
-                    setQueueSort(event.target.value as MyWorkQueueSort)
-                  }
-                  className="bg-transparent outline-none"
-                >
-                  <option value="due">Due</option>
-                  <option value="priority">Priority</option>
-                  <option value="project">Project</option>
-                </select>
-              </label>
             </div>
 
             <div className="mt-4 space-y-2">
@@ -1945,6 +2784,7 @@ export default function MyWorkPage() {
                 </p>
               ) : (
                 sortedQueueEntries.map((entry) => {
+                  const isInFocus = focusedTaskKeys.includes(entry.key);
                   const isRecurringItem =
                     activeTab === "recurring" &&
                     isRecurringForDate(entry.task, todayIsoDate, todayWeekday);
@@ -1968,14 +2808,21 @@ export default function MyWorkPage() {
                       <div className="min-w-0">
                         <p className="truncate font-medium text-slate-900">{entry.task.title}</p>
                         <p className="mt-1 text-xs text-slate-600">
-                          <span className="text-slate-400">Project</span> ·{" "}
-                          <Link
-                            href={`/marketing/projects/${entry.projectId}`}
-                            onClick={(event) => event.stopPropagation()}
-                            className="text-blue-700 hover:underline"
-                          >
-                            {entry.project.name}
-                          </Link>
+                          <span className="text-slate-400">
+                            {entry.source === "direct" ? "Source" : "Project"}
+                          </span>{" "}
+                          ·{" "}
+                          {entry.projectHref ? (
+                            <Link
+                              href={entry.projectHref}
+                              onClick={(event) => event.stopPropagation()}
+                              className="text-blue-700 hover:underline"
+                            >
+                              {entry.projectName}
+                            </Link>
+                          ) : (
+                            <span>{entry.contextLabel}</span>
+                          )}
                         </p>
                       </div>
 
@@ -2042,12 +2889,16 @@ export default function MyWorkPage() {
                           type="button"
                           onClick={(event) => {
                             event.stopPropagation();
-                            moveTaskToFocus(entry.key);
+                            toggleTaskFocus(entry.key);
                           }}
-                          className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                          className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium ${
+                            isInFocus
+                              ? "border-emerald-200 bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
+                              : "border-slate-200 text-slate-700 hover:bg-slate-100"
+                          }`}
                         >
                           <Target className="h-3.5 w-3.5" />
-                          Move to focus
+                          {isInFocus ? "In focus" : "Move to focus"}
                         </button>
                         {entry.task.status !== "Done" ? (
                           <button
@@ -2081,6 +2932,273 @@ export default function MyWorkPage() {
                             Done today
                           </label>
                         ) : null}
+                      </div>
+                    </article>
+                  );
+                })
+              )}
+            </div>
+          </section>
+
+          <section className="order-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold">Assigned by me</h2>
+                <p className="text-xs text-slate-500">
+                  {currentAssignedByMeEntries.length} visible
+                </p>
+              </div>
+              <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">
+                {([
+                  { id: "all", label: "All", count: assignedByMeEntriesByTab.all.length },
+                  {
+                    id: "overdue",
+                    label: "Overdue",
+                    count: assignedByMeEntriesByTab.overdue.length,
+                  },
+                  {
+                    id: "today",
+                    label: "Today",
+                    count: assignedByMeEntriesByTab.today.length,
+                  },
+                  {
+                    id: "week",
+                    label: "This week",
+                    count: assignedByMeEntriesByTab.week.length,
+                  },
+                  {
+                    id: "recurring",
+                    label: "Recurring",
+                    count: assignedByMeEntriesByTab.recurring.length,
+                  },
+                ] as Array<{ id: MyWorkTab; label: string; count: number }>).map(
+                  (tab) => (
+                    <button
+                      key={`assigned-by-me-tab-${tab.id}`}
+                      type="button"
+                      onClick={() => setAssignedByMeTab(tab.id)}
+                      className={`rounded-md px-3 py-1.5 text-xs font-medium ${
+                        assignedByMeTab === tab.id
+                          ? "bg-slate-900 text-white"
+                          : "text-slate-600 hover:bg-slate-100"
+                      }`}
+                    >
+                      {tab.label} ({tab.count})
+                    </button>
+                  )
+                )}
+              </div>
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 p-2">
+              <div className="relative w-full min-w-[160px] max-w-[220px]">
+                <Search className="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-slate-400" />
+                <input
+                  type="text"
+                  value={assignedByMeFilters.search}
+                  onChange={(event) =>
+                    setAssignedByMeFilters((currentFilters) => ({
+                      ...currentFilters,
+                      search: event.target.value,
+                    }))
+                  }
+                  placeholder="Search..."
+                  className="h-8 w-full rounded-md border border-slate-200 bg-white py-1.5 pl-7 pr-2 text-sm outline-none transition focus:border-slate-400"
+                />
+              </div>
+              <select
+                value={assignedByMeFilters.status}
+                onChange={(event) =>
+                  setAssignedByMeFilters((currentFilters) => ({
+                    ...currentFilters,
+                    status: event.target.value as MyWorkStatusFilter,
+                  }))
+                }
+                className="h-8 w-[120px] rounded-md border border-slate-200 bg-white px-2 text-sm"
+              >
+                <option value={ALL_FILTER_VALUE}>Status</option>
+                {(["To Do", "In Progress", "Review"] as MarketingTaskStatus[]).map(
+                  (status) => (
+                    <option key={status} value={status}>
+                      {status}
+                    </option>
+                  )
+                )}
+              </select>
+              <select
+                value={assignedByMeFilters.priority}
+                onChange={(event) =>
+                  setAssignedByMeFilters((currentFilters) => ({
+                    ...currentFilters,
+                    priority: event.target.value as MyWorkPriorityFilter,
+                  }))
+                }
+                className="h-8 w-[120px] rounded-md border border-slate-200 bg-white px-2 text-sm"
+              >
+                <option value={ALL_FILTER_VALUE}>Priority</option>
+                {TASK_PRIORITY_OPTIONS.map((priority) => (
+                  <option key={priority} value={priority}>
+                    {priority}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={assignedByMeFilters.due}
+                onChange={(event) =>
+                  setAssignedByMeFilters((currentFilters) => ({
+                    ...currentFilters,
+                    due: event.target.value as MyWorkDueFilter,
+                  }))
+                }
+                className="h-8 w-[130px] rounded-md border border-slate-200 bg-white px-2 text-sm"
+              >
+                <option value={ALL_FILTER_VALUE}>Due</option>
+                <option value="overdue">Overdue</option>
+                <option value="today">Today</option>
+                <option value="week">This week</option>
+                <option value="no_due">No due</option>
+              </select>
+              <details className="group relative">
+                <summary className="inline-flex h-8 list-none items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-xs text-slate-700 hover:bg-slate-100">
+                  More filters
+                  <ChevronDown className="h-3.5 w-3.5 text-slate-400 group-open:rotate-180" />
+                </summary>
+                <div className="absolute right-0 z-20 mt-1 w-44 rounded-md border border-slate-200 bg-white p-2 shadow-lg">
+                  <label className="mb-2 inline-flex items-center gap-1.5 text-xs text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={assignedByMeFilters.onlyBlocked}
+                      onChange={(event) =>
+                        setAssignedByMeFilters((currentFilters) => ({
+                          ...currentFilters,
+                          onlyBlocked: event.target.checked,
+                        }))
+                      }
+                    />
+                    Blocked only
+                  </label>
+                  <label className="inline-flex items-center gap-1.5 text-xs text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={assignedByMeFilters.onlyDependent}
+                      onChange={(event) =>
+                        setAssignedByMeFilters((currentFilters) => ({
+                          ...currentFilters,
+                          onlyDependent: event.target.checked,
+                        }))
+                      }
+                    />
+                    Dependencies
+                  </label>
+                </div>
+              </details>
+              <button
+                type="button"
+                onClick={clearAssignedByMeFilters}
+                className="h-8 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-100"
+              >
+                Clear
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-2">
+              {currentAssignedByMeEntries.length === 0 ? (
+                <p className="rounded-md border border-dashed border-slate-300 p-4 text-sm text-slate-600">
+                  No active assigned tasks found.
+                </p>
+              ) : (
+                currentAssignedByMeEntries.map((entry) => {
+                  const unresolvedDependencies = entry.task.dependencyTaskIds.length;
+                  const hasBlocker = entry.task.blockerReason.trim().length > 0;
+
+                  return (
+                    <article
+                      key={`assigned-by-me-${entry.key}`}
+                      onClick={() => openTaskModal(entry)}
+                      className="cursor-pointer rounded-lg border border-slate-200 bg-white p-3 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate font-medium text-slate-900">{entry.task.title}</p>
+                        <p className="mt-1 text-xs text-slate-600">
+                          <span className="text-slate-400">
+                            {entry.projectHref ? "Project" : "Source"}
+                          </span>{" "}
+                          ·{" "}
+                          {entry.projectHref ? (
+                            <Link
+                              href={entry.projectHref}
+                              onClick={(event) => event.stopPropagation()}
+                              className="text-blue-700 hover:underline"
+                            >
+                              {entry.projectName}
+                            </Link>
+                          ) : (
+                            <span>{entry.contextLabel}</span>
+                          )}
+                        </p>
+                      </div>
+
+                      <div className="mt-2 grid gap-2 text-xs text-slate-700 sm:grid-cols-2 lg:grid-cols-3">
+                        <p>
+                          <span className="text-slate-400">Assignee</span>
+                          <span className="ml-1">{entry.task.assignee ?? "Unassigned"}</span>
+                        </p>
+                        <p>
+                          <span className="text-slate-400">Status</span>
+                          <span
+                            className={`ml-1 inline-flex rounded-full border px-2 py-0.5 ${getStatusBadgeClasses(
+                              entry.task.status
+                            )}`}
+                          >
+                            {entry.task.status}
+                          </span>
+                        </p>
+                        <p>
+                          <span className="text-slate-400">Priority</span>
+                          <span
+                            className={`ml-1 inline-flex rounded-full border px-2 py-0.5 ${getPriorityBadgeClasses(
+                              entry.task.priority
+                            )}`}
+                          >
+                            {entry.task.priority}
+                          </span>
+                        </p>
+                        <p>
+                          <span className="text-slate-400">Due</span>
+                          <span className="ml-1">{entry.task.dueDate || "--"}</span>
+                        </p>
+                        <p>
+                          <span className="text-slate-400">Assigned</span>
+                          <span className="ml-1">{formatHours(entry.task.hoursAssigned)}</span>
+                        </p>
+                        <p>
+                          <span className="text-slate-400">Spent</span>
+                          <span className="ml-1">{formatHours(entry.task.timeSpent)}</span>
+                        </p>
+                      </div>
+
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                        {hasBlocker ? (
+                          <span className="inline-flex rounded-full border border-red-200 bg-red-100 px-2 py-0.5 text-[11px] text-red-700">
+                            Blocker
+                          </span>
+                        ) : null}
+                        {unresolvedDependencies > 0 ? (
+                          <span className="inline-flex rounded-full border border-orange-200 bg-orange-100 px-2 py-0.5 text-[11px] text-orange-700">
+                            {unresolvedDependencies} dependency
+                            {unresolvedDependencies === 1 ? "" : "ies"} open
+                          </span>
+                        ) : null}
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            openTaskModal(entry);
+                          }}
+                          className="rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                        >
+                          Open
+                        </button>
                       </div>
                     </article>
                   );
@@ -2208,7 +3326,7 @@ export default function MyWorkPage() {
                     >
                       <p className="truncate font-medium text-slate-900">{project.projectName}</p>
                       <p className="mt-0.5 text-slate-600">
-                        {project.stream} · Open {project.open} · Overdue {project.overdue}
+                        {project.stream} | Open {project.open} | Overdue {project.overdue}
                       </p>
                     </Link>
                   ))}
@@ -2246,6 +3364,308 @@ export default function MyWorkPage() {
           </section>
         </aside>
       </div>
+
+      {isCreateTaskModalOpen ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={closeCreateTaskModal}
+        >
+          <div
+            className="flex max-h-[90vh] w-full max-w-3xl flex-col rounded-xl bg-white shadow-xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-black/10 px-5 py-3">
+              <h2 className="text-lg font-semibold">Create task</h2>
+              <button
+                type="button"
+                onClick={closeCreateTaskModal}
+                className="rounded-md border border-black/15 p-1.5 hover:bg-black/5"
+                aria-label="Close"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <form onSubmit={submitCreateTask} className="flex min-h-0 flex-1 flex-col">
+              <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
+                <label className="block">
+                  <span className="text-sm font-medium">Task destination</span>
+                  <select
+                    value={createTaskTarget}
+                    onChange={(event) => {
+                      setCreateTaskTarget(event.target.value);
+                      setCreateTaskDependencyTaskIds([]);
+                    }}
+                    className="mt-1 w-full rounded-md border border-black/15 px-3 py-2 text-sm"
+                  >
+                    {createTaskTargetOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="block">
+                  <span className="text-sm font-medium">Task Title</span>
+                  <input
+                    type="text"
+                    required
+                    value={createTaskTitle}
+                    onChange={(event) => setCreateTaskTitle(event.target.value)}
+                    className="mt-1 w-full rounded-md border border-black/15 px-3 py-2 text-sm"
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="text-sm font-medium">Description</span>
+                  <textarea
+                    value={createTaskDescription}
+                    onChange={(event) => setCreateTaskDescription(event.target.value)}
+                    rows={3}
+                    className="mt-1 w-full rounded-md border border-black/15 px-3 py-2 text-sm"
+                  />
+                </label>
+
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                  <label className="block">
+                    <span className="text-sm font-medium">Due Date</span>
+                    <input
+                      type="date"
+                      required
+                      value={createTaskDueDate}
+                      onChange={(event) => setCreateTaskDueDate(event.target.value)}
+                      className="mt-1 w-full rounded-md border border-black/20 px-3 py-2 text-sm"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="text-sm font-medium">Assignee</span>
+                    <select
+                      value={createTaskAssignee}
+                      onChange={(event) => setCreateTaskAssignee(event.target.value)}
+                      className="mt-1 w-full rounded-md border border-black/20 px-3 py-2 text-sm"
+                    >
+                      <option value={UNASSIGNED_VALUE}>Unassigned (auto assign me)</option>
+                      {createTaskAssigneeOptions.map((personName) => (
+                        <option key={personName} value={personName}>
+                          {personName}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="block">
+                    <span className="text-sm font-medium">Hours Assigned</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.5"
+                      value={createTaskHoursAssigned}
+                      onChange={(event) => setCreateTaskHoursAssigned(event.target.value)}
+                      className="mt-1 w-full rounded-md border border-black/20 px-3 py-2 text-sm"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="text-sm font-medium">Priority</span>
+                    <select
+                      value={createTaskPriority}
+                      onChange={(event) =>
+                        setCreateTaskPriority(event.target.value as MarketingTaskPriority)
+                      }
+                      className="mt-1 w-full rounded-md border border-black/20 px-3 py-2 text-sm"
+                    >
+                      {TASK_PRIORITY_OPTIONS.map((priority) => (
+                        <option key={priority} value={priority}>
+                          {priority}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                <label className="block">
+                  <span className="text-sm font-medium">Blocker (optional)</span>
+                  <input
+                    type="text"
+                    value={createTaskBlockerReason}
+                    onChange={(event) => setCreateTaskBlockerReason(event.target.value)}
+                    placeholder="Waiting on legal approval, assets, feedback..."
+                    className="mt-1 w-full rounded-md border border-black/20 px-3 py-2 text-sm"
+                  />
+                </label>
+
+                <div className="rounded-md border border-black/10 p-3">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setIsCreateTaskDependenciesOpen((isOpen) => !isOpen)
+                    }
+                    className="flex w-full items-center justify-between gap-2 text-left"
+                  >
+                    <p className="text-sm font-medium">
+                      Dependencies
+                      {createTaskDependencyTaskIds.length > 0
+                        ? ` (${createTaskDependencyTaskIds.length})`
+                        : ""}
+                    </p>
+                    {isCreateTaskDependenciesOpen ? (
+                      <ChevronDown className="h-4 w-4 text-black/55" />
+                    ) : (
+                      <ChevronRight className="h-4 w-4 text-black/55" />
+                    )}
+                  </button>
+                  {isCreateTaskDependenciesOpen ? (
+                    createTaskDependencyCandidates.length === 0 ? (
+                      <p className="mt-2 text-xs text-black/55">
+                        No existing tasks to link.
+                      </p>
+                    ) : (
+                      <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                        {createTaskDependencyCandidates.map((task) => (
+                          <label
+                            key={`create-dependency-${task.id}`}
+                            className="inline-flex items-center gap-2 text-xs text-black/75"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={createTaskDependencyTaskIds.includes(task.id)}
+                              onChange={() => toggleCreateTaskDependency(task.id)}
+                            />
+                            <span className="truncate">{task.title}</span>
+                          </label>
+                        ))}
+                      </div>
+                    )
+                  ) : null}
+                </div>
+
+                <label className="inline-flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={createTaskIsRecurring}
+                    onChange={(event) => setCreateTaskIsRecurring(event.target.checked)}
+                  />
+                  Recurring task
+                </label>
+
+                {createTaskIsRecurring ? (
+                  <div className="rounded-md border border-black/10 p-3">
+                    <p className="text-sm font-medium">Recurring days</p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {RECURRING_WEEKDAY_OPTIONS.map((day) => {
+                        const isSelected = createTaskRecurringDays.includes(day);
+                        return (
+                          <button
+                            key={day}
+                            type="button"
+                            onClick={() => toggleCreateTaskRecurringDay(day)}
+                            className={`rounded-md border px-2.5 py-1 text-xs ${
+                              isSelected
+                                ? "border-black bg-black text-white"
+                                : "border-black/20 hover:bg-black/5"
+                            }`}
+                          >
+                            {day}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <label className="mt-3 block text-sm">
+                      Time per occurrence (hours)
+                      <input
+                        type="number"
+                        min={0}
+                        step={0.5}
+                        value={createTaskRecurringTimePerOccurrenceHours}
+                        onChange={(event) =>
+                          setCreateTaskRecurringTimePerOccurrenceHours(
+                            event.target.value
+                          )
+                        }
+                        className="mt-1 w-full rounded-md border border-black/20 px-3 py-2"
+                      />
+                    </label>
+                  </div>
+                ) : null}
+
+                <label className="inline-flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={isCreateTaskSubtasksEnabled}
+                    onChange={(event) =>
+                      setIsCreateTaskSubtasksEnabled(event.target.checked)
+                    }
+                  />
+                  Add subtasks
+                </label>
+
+                {isCreateTaskSubtasksEnabled ? (
+                  <div className="rounded-md border border-black/10 p-3">
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={newCreateTaskSubtaskTitle}
+                        onChange={(event) =>
+                          setNewCreateTaskSubtaskTitle(event.target.value)
+                        }
+                        placeholder="Subtask title"
+                        className="flex-1 rounded-md border border-black/20 px-3 py-2 text-sm"
+                      />
+                      <button
+                        type="button"
+                        onClick={addCreateTaskSubtask}
+                        className="rounded-md border border-black/20 px-3 py-2 text-sm hover:bg-black/5"
+                      >
+                        Add
+                      </button>
+                    </div>
+                    <div className="mt-3 space-y-2">
+                      {createTaskSubtasks.map((subtask) => (
+                        <div
+                          key={subtask.id}
+                          className="flex items-center justify-between gap-2"
+                        >
+                          <label className="inline-flex items-center gap-2 text-sm">
+                            <input
+                              type="checkbox"
+                              checked={subtask.done}
+                              onChange={() => toggleCreateTaskSubtask(subtask.id)}
+                            />
+                            {subtask.title}
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => removeCreateTaskSubtask(subtask.id)}
+                            className="rounded border border-black/20 p-1 hover:bg-black/5"
+                            title="Remove subtask"
+                            aria-label="Remove subtask"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="flex items-center justify-end gap-2 border-t border-black/10 px-5 py-3">
+                <button
+                  type="button"
+                  onClick={closeCreateTaskModal}
+                  className="rounded-md border border-black/20 px-3 py-1.5 text-sm font-medium hover:bg-black/5"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="rounded-md bg-black px-3 py-1.5 text-sm font-medium text-white hover:bg-black/85"
+                >
+                  Create
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
 
       {customTodoModalId ? (
         <div
@@ -2556,9 +3976,9 @@ export default function MyWorkPage() {
                       className="mt-1 w-full rounded-md border border-black/15 px-3 py-2 text-sm"
                     >
                       <option value={UNASSIGNED_VALUE}>Unassigned</option>
-                      {modalProjectMembers.map((member) => (
-                        <option key={member.id} value={member.name}>
-                          {member.name}
+                      {modalAssigneeOptions.map((personName) => (
+                        <option key={personName} value={personName}>
+                          {personName}
                         </option>
                       ))}
                     </select>
@@ -2731,4 +4151,6 @@ export default function MyWorkPage() {
     </div>
   );
 }
+
+
 

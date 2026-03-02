@@ -11,6 +11,7 @@ export type SessionUser = {
   name: string;
   title: string;
   reportsTo: string;
+  role: "admin" | "member";
 };
 
 type SessionPayload = SessionUser;
@@ -63,12 +64,15 @@ function toSessionUser(payload: unknown): SessionUser | null {
     return null;
   }
 
+  const role = value.role === "admin" ? "admin" : "member";
+
   return {
     id: value.id,
     email: value.email,
     name: value.name,
     title: value.title,
     reportsTo: value.reportsTo,
+    role,
   };
 }
 
@@ -84,4 +88,3 @@ export async function verifySessionToken(token: string): Promise<SessionUser | n
     return null;
   }
 }
-

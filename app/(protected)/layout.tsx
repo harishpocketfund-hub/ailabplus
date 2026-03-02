@@ -10,7 +10,7 @@ import {
   Shield,
   Users,
 } from "lucide-react";
-import { useEffect, useRef, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
   clearDemoUser,
@@ -21,9 +21,12 @@ import {
   writeDemoUser,
 } from "@/lib/demo-user";
 import { hydrateWorkstreamStateFromSupabase } from "@/lib/supabase/workstream-state-client";
+import { fetchUserPreference, saveUserPreference } from "@/lib/preferences-client";
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "internal-system-sidebar-collapsed";
 const SIDEBAR_COLLAPSED_UPDATED_EVENT = "internal-system-sidebar-collapsed-updated";
+const SIDEBAR_PREFERENCES_NAMESPACE = "app-shell";
+const SIDEBAR_PREFERENCES_CONTEXT_ID = "sidebar";
 
 const getSidebarCollapsedSnapshot = (): string => {
   if (typeof window === "undefined") {
@@ -56,10 +59,10 @@ const subscribeToSidebarCollapsed = (
 
 const sidebarLinks = [
   { href: "/my-work", label: "My Work", icon: LayoutDashboard },
-  { href: "/team", label: "Team", icon: Users },
   { href: "/marketing", label: "Marketing", icon: Megaphone },
   { href: "/development", label: "Development", icon: Code2 },
-  { href: "/admin", label: "Admin", icon: Shield },
+  { href: "/admin", label: "Admin", icon: Shield, adminOnly: true },
+  { href: "/team", label: "Team", icon: Users, adminOnly: true },
 ];
 
 export default function ProtectedLayout({
@@ -79,7 +82,11 @@ export default function ProtectedLayout({
   );
   const isSidebarCollapsed = sidebarCollapsedRaw === "true";
   const user = parseDemoUser(rawUser);
+  const userName = user?.name ?? "";
+  const isAdmin = user?.role === "admin";
   const hasHydratedWorkstreamStateRef = useRef(false);
+  const [loadedSidebarPreferenceForUser, setLoadedSidebarPreferenceForUser] =
+    useState("");
 
   useEffect(() => {
     if (user) {
@@ -105,9 +112,11 @@ export default function ProtectedLayout({
 
         const payload = (await response.json()) as {
           user?: {
+            id: string;
             name: string;
             title: string;
             reportsTo: string;
+            role: "admin" | "member";
           };
         };
 
@@ -137,6 +146,79 @@ export default function ProtectedLayout({
     hasHydratedWorkstreamStateRef.current = true;
     void hydrateWorkstreamStateFromSupabase();
   }, [user]);
+
+  useEffect(() => {
+    if (!user) {
+      return;
+    }
+
+    if (
+      user.role !== "admin" &&
+      (pathname === "/admin" ||
+        pathname.startsWith("/admin/") ||
+        pathname === "/team" ||
+        pathname.startsWith("/team/"))
+    ) {
+      router.replace("/my-work");
+    }
+  }, [pathname, router, user]);
+
+  useEffect(() => {
+    if (!userName || typeof window === "undefined") {
+      return;
+    }
+
+    let isMounted = true;
+
+    const loadSidebarPreference = async () => {
+      const preference = await fetchUserPreference(
+        SIDEBAR_PREFERENCES_NAMESPACE,
+        SIDEBAR_PREFERENCES_CONTEXT_ID
+      );
+
+      if (!isMounted) {
+        return;
+      }
+
+      if (preference && typeof preference.collapsed === "boolean") {
+        window.localStorage.setItem(
+          SIDEBAR_COLLAPSED_STORAGE_KEY,
+          String(preference.collapsed)
+        );
+        window.dispatchEvent(new Event(SIDEBAR_COLLAPSED_UPDATED_EVENT));
+      }
+
+      setLoadedSidebarPreferenceForUser(userName);
+    };
+
+    void loadSidebarPreference();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [userName]);
+
+  useEffect(() => {
+    if (
+      !userName ||
+      loadedSidebarPreferenceForUser !== userName ||
+      typeof window === "undefined"
+    ) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void saveUserPreference(
+        SIDEBAR_PREFERENCES_NAMESPACE,
+        { collapsed: isSidebarCollapsed },
+        SIDEBAR_PREFERENCES_CONTEXT_ID
+      );
+    }, 150);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [isSidebarCollapsed, loadedSidebarPreferenceForUser, userName]);
 
   const onLogout = async () => {
     try {
@@ -210,7 +292,9 @@ export default function ProtectedLayout({
           )}
         </div>
         <nav className="flex flex-col gap-2">
-          {sidebarLinks.map((item) => {
+          {sidebarLinks
+            .filter((item) => !item.adminOnly || isAdmin)
+            .map((item) => {
             const isActive =
               pathname === item.href || pathname.startsWith(`${item.href}/`);
             const Icon = item.icon;

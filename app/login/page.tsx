@@ -50,9 +50,11 @@ export default function LoginPage() {
 
       const payload = (await response.json().catch(() => ({}))) as {
         user?: {
+          id: string;
           name: string;
           title: string;
           reportsTo: string;
+          role: "admin" | "member";
         };
         error?: string;
       };
@@ -66,6 +68,7 @@ export default function LoginPage() {
         name: payload.user.name,
         title: payload.user.title,
         reportsTo: payload.user.reportsTo,
+        role: payload.user.role,
       });
 
       router.push("/my-work");

@@ -34,6 +34,9 @@ export type DevelopmentSubtask = {
 export type DevelopmentTask = {
   id: string;
   createdAt: string | null;
+  assignedByName: string | null;
+  assignedByUserId: string | null;
+  assignedAtIso: string | null;
   title: string;
   description: string;
   dueDate: string;
@@ -194,6 +197,18 @@ function toDevelopmentTask(
     : "Medium";
   const subtasks = parseDevelopmentSubtasks(task.subtasks);
   const createdAt = parseTaskCreatedAt(task.createdAt);
+  const assignedByName =
+    typeof task.assignedByName === "string" && task.assignedByName.trim()
+      ? task.assignedByName.trim()
+      : null;
+  const assignedByUserId =
+    typeof task.assignedByUserId === "string" && task.assignedByUserId.trim()
+      ? task.assignedByUserId.trim()
+      : null;
+  const assignedAtIso =
+    typeof task.assignedAtIso === "string" && task.assignedAtIso.trim()
+      ? task.assignedAtIso.trim()
+      : null;
   const isRecurring = task.isRecurring === true;
   const recurringDays = parseDevelopmentRecurringDays(task.recurringDays);
   const recurringTimePerOccurrenceHours =
@@ -209,6 +224,9 @@ function toDevelopmentTask(
   return {
     id: task.id,
     createdAt,
+    assignedByName,
+    assignedByUserId,
+    assignedAtIso,
     title: task.title,
     description: task.description,
     dueDate: task.dueDate,

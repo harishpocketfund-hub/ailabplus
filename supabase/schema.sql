@@ -28,6 +28,10 @@ begin
   if not exists (select 1 from pg_type where typname = 'commit_scope_type') then
     create type public.commit_scope_type as enum ('project', 'task');
   end if;
+
+  if not exists (select 1 from pg_type where typname = 'app_user_role_type') then
+    create type public.app_user_role_type as enum ('admin', 'member');
+  end if;
 end $$;
 
 create or replace function public.set_updated_at()
@@ -56,8 +60,13 @@ create table if not exists public.app_users (
   constraint app_users_email_format_chk check (position('@' in email) > 1)
 );
 
+alter table public.app_users
+  add column if not exists role public.app_user_role_type not null default 'member';
+
 create unique index if not exists app_users_email_lower_uidx
   on public.app_users (lower(email));
+create index if not exists app_users_role_idx
+  on public.app_users (role);
 
 create trigger trg_app_users_updated_at
 before update on public.app_users
@@ -177,6 +186,60 @@ create trigger trg_tasks_updated_at
 before update on public.tasks
 for each row execute function public.set_updated_at();
 
+create table if not exists public.direct_tasks (
+  id text primary key,
+  title text not null,
+  description text not null default '',
+  due_date date not null,
+  status public.task_status_type not null default 'To Do',
+  order_index integer not null default 0,
+  assignee text null,
+  hours_assigned numeric(10,2) not null default 0,
+  blocker_reason text not null default '',
+  dependency_task_ids text[] not null default '{}',
+  time_spent numeric(10,2) not null default 0,
+  priority public.priority_type not null default 'Medium',
+  subtasks jsonb not null default '[]'::jsonb,
+  is_recurring boolean not null default false,
+  recurring_days text[] not null default '{}',
+  recurring_time_per_occurrence_hours numeric(10,2) not null default 0,
+  recurring_completions jsonb not null default '{}'::jsonb,
+  assigned_by_user_id text null references public.app_users(id) on delete set null,
+  assigned_by_name text null,
+  assigned_at timestamptz null,
+  created_by_user_id text null references public.app_users(id) on delete set null,
+  updated_by_user_id text null references public.app_users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint direct_tasks_id_not_blank_chk check (length(trim(id)) > 0),
+  constraint direct_tasks_order_non_negative_chk check (order_index >= 0),
+  constraint direct_tasks_hours_assigned_non_negative_chk
+    check (hours_assigned >= 0),
+  constraint direct_tasks_time_spent_non_negative_chk check (time_spent >= 0),
+  constraint direct_tasks_recurring_hours_non_negative_chk
+    check (recurring_time_per_occurrence_hours >= 0),
+  constraint direct_tasks_recurring_days_chk
+    check (recurring_days <@ array['Mon','Tue','Wed','Thu','Fri','Sat','Sun']),
+  constraint direct_tasks_subtasks_chk check (jsonb_typeof(subtasks) = 'array'),
+  constraint direct_tasks_recurring_completions_chk
+    check (jsonb_typeof(recurring_completions) = 'object')
+);
+
+create index if not exists direct_tasks_status_order_idx
+  on public.direct_tasks (status, order_index);
+create index if not exists direct_tasks_due_status_idx
+  on public.direct_tasks (due_date, status);
+create index if not exists direct_tasks_priority_idx
+  on public.direct_tasks (priority);
+create index if not exists direct_tasks_assignee_idx
+  on public.direct_tasks (assignee);
+create index if not exists direct_tasks_assigned_by_idx
+  on public.direct_tasks (assigned_by_name);
+
+create trigger trg_direct_tasks_updated_at
+before update on public.direct_tasks
+for each row execute function public.set_updated_at();
+
 create table if not exists public.project_commit_logs (
   id text primary key,
   project_id text not null references public.projects(id) on delete cascade,
@@ -200,6 +263,45 @@ create index if not exists project_commit_logs_project_changed_at_idx
   on public.project_commit_logs (project_id, changed_at desc);
 create index if not exists project_commit_logs_changed_by_idx
   on public.project_commit_logs (changed_by_name);
+
+create table if not exists public.task_assignment_events (
+  id uuid primary key default gen_random_uuid(),
+  workstream public.workstream_type not null,
+  project_id text not null,
+  project_name text not null,
+  task_id text not null,
+  task_title text not null,
+  action text not null,
+  from_assignee text null,
+  to_assignee text null,
+  from_hours_assigned numeric(10,2) not null default 0,
+  to_hours_assigned numeric(10,2) not null default 0,
+  changed_by_user_id text null references public.app_users(id) on delete set null,
+  changed_by_name text not null,
+  changed_by_email text null,
+  reason text not null default 'manual',
+  changed_at timestamptz not null default now(),
+  changed_at_india text null,
+  metadata jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  constraint task_assignment_events_action_chk
+    check (action in ('assigned', 'reassigned', 'unassigned', 'hours_changed')),
+  constraint task_assignment_events_hours_non_negative_chk
+    check (from_hours_assigned >= 0 and to_hours_assigned >= 0),
+  constraint task_assignment_events_metadata_object_chk
+    check (jsonb_typeof(metadata) = 'object')
+);
+
+create index if not exists task_assignment_events_project_changed_at_idx
+  on public.task_assignment_events (workstream, project_id, changed_at desc);
+create index if not exists task_assignment_events_task_changed_at_idx
+  on public.task_assignment_events (task_id, changed_at desc);
+create index if not exists task_assignment_events_actor_changed_at_idx
+  on public.task_assignment_events (changed_by_user_id, changed_at desc);
+create index if not exists task_assignment_events_to_assignee_idx
+  on public.task_assignment_events (to_assignee);
+create index if not exists task_assignment_events_action_idx
+  on public.task_assignment_events (action);
 
 create table if not exists public.user_preferences (
   id uuid primary key default gen_random_uuid(),

@@ -31,6 +31,7 @@ export async function GET() {
       name: user.name,
       email: user.email,
       title: user.title,
+      role: user.role,
     })),
   });
 }
