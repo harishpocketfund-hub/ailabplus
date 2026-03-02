@@ -8,6 +8,8 @@ import {
   BadgeAlert,
   CalendarClock,
   CalendarDays,
+  ChevronDown,
+  ChevronRight,
   Check,
   CircleAlert,
   Flame,
@@ -614,6 +616,10 @@ export default function MyWorkPage() {
   const [modalStatus, setModalStatus] = useState<MarketingTaskStatus>("To Do");
   const [modalPriority, setModalPriority] = useState<MarketingTaskPriority>("Medium");
   const [modalAssignee, setModalAssignee] = useState<string>(UNASSIGNED_VALUE);
+  const [modalHoursAssigned, setModalHoursAssigned] = useState("0");
+  const [modalBlockerReason, setModalBlockerReason] = useState("");
+  const [modalDependencyTaskIds, setModalDependencyTaskIds] = useState<string[]>([]);
+  const [isModalDependenciesOpen, setIsModalDependenciesOpen] = useState(false);
   const [modalTimeSpent, setModalTimeSpent] = useState("0");
   const [modalSubtasks, setModalSubtasks] = useState<MarketingSubtask[]>([]);
   const [newModalSubtaskTitle, setNewModalSubtaskTitle] = useState("");
@@ -623,6 +629,10 @@ export default function MyWorkPage() {
     useState("0");
   const [modalRecurringCompletions, setModalRecurringCompletions] =
     useState<MarketingRecurringCompletions>({});
+  const [customTodoModalId, setCustomTodoModalId] = useState<string | null>(null);
+  const [customTodoModalTitle, setCustomTodoModalTitle] = useState("");
+  const [customTodoModalHours, setCustomTodoModalHours] = useState("0");
+  const [customTodoModalDone, setCustomTodoModalDone] = useState(false);
 
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null);
 
@@ -843,6 +853,11 @@ export default function MyWorkPage() {
       if (modalTaskKey) {
         setModalTaskKey(null);
         setDeleteTarget(null);
+        return;
+      }
+
+      if (customTodoModalId) {
+        setCustomTodoModalId(null);
       }
     };
 
@@ -850,7 +865,7 @@ export default function MyWorkPage() {
     return () => {
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [deleteTarget, modalTaskKey]);
+  }, [customTodoModalId, deleteTarget, modalTaskKey]);
 
   const unresolvedDependencyCountByTaskKey = useMemo(() => {
     const counts = new Map<string, number>();
@@ -1076,6 +1091,9 @@ export default function MyWorkPage() {
 
   const modalEntry = modalTaskKey ? taskEntryByKey.get(modalTaskKey) ?? null : null;
   const modalProjectMembers = modalEntry?.members ?? [];
+  const modalProjectTasks = modalEntry ? tasksByProject[modalEntry.projectId] ?? [] : [];
+  const parsedModalTaskKey = modalTaskKey ? parseTaskKey(modalTaskKey) : null;
+  const modalTaskId = parsedModalTaskKey?.taskId ?? null;
 
   const modalRecurringWeekDates = useMemo(() => {
     if (!modalIsRecurringTask) {
@@ -1204,44 +1222,67 @@ export default function MyWorkPage() {
     setNewCustomTodoHours("");
   };
 
-  const updateCustomTodoHours = (todoId: string, nextRawValue: string) => {
-    const parsedHours = Number(nextRawValue);
-    if (!Number.isFinite(parsedHours) || parsedHours < 0) {
-      return;
-    }
-
-    setCustomTodos((currentTodos) =>
-      currentTodos.map((todo) =>
-        todo.id === todoId
-          ? {
-              ...todo,
-              hours: parsedHours,
-            }
-          : todo
-      )
-    );
-  };
-
-  const toggleCustomTodoDone = (todoId: string) => {
-    setCustomTodos((currentTodos) =>
-      currentTodos.map((todo) =>
-        todo.id === todoId
-          ? {
-              ...todo,
-              done: !todo.done,
-            }
-          : todo
-      )
-    );
-  };
-
   const removeCustomTodo = (todoId: string) => {
     setCustomTodos((currentTodos) =>
       currentTodos.filter((todo) => todo.id !== todoId)
     );
   };
 
+  const openCustomTodoModal = (todo: MyWorkCustomTodo) => {
+    setModalTaskKey(null);
+    setDeleteTarget(null);
+    setCustomTodoModalId(todo.id);
+    setCustomTodoModalTitle(todo.title);
+    setCustomTodoModalHours(String(todo.hours));
+    setCustomTodoModalDone(todo.done);
+  };
+
+  function closeCustomTodoModal() {
+    setCustomTodoModalId(null);
+    setCustomTodoModalTitle("");
+    setCustomTodoModalHours("0");
+    setCustomTodoModalDone(false);
+  }
+
+  const saveCustomTodoModal = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!customTodoModalId) {
+      return;
+    }
+
+    const trimmedTitle = customTodoModalTitle.trim();
+    const parsedHours = Number(customTodoModalHours);
+    if (!trimmedTitle || !Number.isFinite(parsedHours) || parsedHours < 0) {
+      return;
+    }
+
+    setCustomTodos((currentTodos) =>
+      currentTodos.map((todo) =>
+        todo.id === customTodoModalId
+          ? {
+              ...todo,
+              title: trimmedTitle,
+              hours: parsedHours,
+              done: customTodoModalDone,
+            }
+          : todo
+      )
+    );
+
+    closeCustomTodoModal();
+  };
+
+  const deleteCustomTodoModal = () => {
+    if (!customTodoModalId) {
+      return;
+    }
+
+    removeCustomTodo(customTodoModalId);
+    closeCustomTodoModal();
+  };
+
   const openTaskModal = (entry: TaskEntry) => {
+    setCustomTodoModalId(null);
     setModalTaskKey(entry.key);
     setModalTaskTitle(entry.task.title);
     setModalDescription(entry.task.description);
@@ -1249,6 +1290,10 @@ export default function MyWorkPage() {
     setModalStatus(entry.task.status);
     setModalPriority(entry.task.priority);
     setModalAssignee(entry.task.assignee ?? UNASSIGNED_VALUE);
+    setModalHoursAssigned(String(entry.task.hoursAssigned));
+    setModalBlockerReason(entry.task.blockerReason);
+    setModalDependencyTaskIds(entry.task.dependencyTaskIds);
+    setIsModalDependenciesOpen(false);
     setModalTimeSpent(String(entry.task.timeSpent));
     setModalSubtasks(entry.task.subtasks);
     setNewModalSubtaskTitle("");
@@ -1268,6 +1313,10 @@ export default function MyWorkPage() {
     setModalStatus("To Do");
     setModalPriority("Medium");
     setModalAssignee(UNASSIGNED_VALUE);
+    setModalHoursAssigned("0");
+    setModalBlockerReason("");
+    setModalDependencyTaskIds([]);
+    setIsModalDependenciesOpen(false);
     setModalTimeSpent("0");
     setModalSubtasks([]);
     setNewModalSubtaskTitle("");
@@ -1357,10 +1406,15 @@ export default function MyWorkPage() {
     }
 
     const trimmedTitle = modalTaskTitle.trim();
+    const parsedHoursAssigned = Number(modalHoursAssigned);
     const parsedTimeSpent = Number(modalTimeSpent);
     const parsedRecurringHours = Number(modalRecurringTimePerOccurrenceHours);
+    const normalizedBlockerReason = modalBlockerReason.trim();
 
     if (!trimmedTitle || !modalDueDate) {
+      return;
+    }
+    if (!Number.isFinite(parsedHoursAssigned) || parsedHoursAssigned < 0) {
       return;
     }
     if (!Number.isFinite(parsedTimeSpent) || parsedTimeSpent < 0) {
@@ -1382,6 +1436,11 @@ export default function MyWorkPage() {
             (task) => task.status === modalStatus && task.id !== targetTask.id
           ).length
         : targetTask.order;
+      const validDependencyTaskIds = modalDependencyTaskIds.filter(
+        (dependencyTaskId) =>
+          dependencyTaskId !== parsedKey.taskId &&
+          projectTasks.some((task) => task.id === dependencyTaskId)
+      );
 
       return projectTasks.map((task) =>
         task.id === parsedKey.taskId
@@ -1393,6 +1452,9 @@ export default function MyWorkPage() {
               status: modalStatus,
               order: nextOrder,
               assignee: modalAssignee === UNASSIGNED_VALUE ? null : modalAssignee,
+              hoursAssigned: parsedHoursAssigned,
+              blockerReason: normalizedBlockerReason,
+              dependencyTaskIds: validDependencyTaskIds,
               timeSpent: parsedTimeSpent,
               priority: modalPriority,
               subtasks: modalSubtasks,
@@ -1462,6 +1524,16 @@ export default function MyWorkPage() {
       currentDays.includes(day)
         ? currentDays.filter((currentDay) => currentDay !== day)
         : [...currentDays, day]
+    );
+  };
+
+  const toggleModalDependencyTask = (taskId: string) => {
+    setModalDependencyTaskIds((currentDependencyTaskIds) =>
+      currentDependencyTaskIds.includes(taskId)
+        ? currentDependencyTaskIds.filter(
+            (currentDependencyTaskId) => currentDependencyTaskId !== taskId
+          )
+        : [...currentDependencyTaskIds, taskId]
     );
   };
 
@@ -2067,48 +2139,38 @@ export default function MyWorkPage() {
                 {customTodos.map((todo) => (
                   <li
                     key={getCustomTodoKey(todo.id)}
-                    className={`rounded-md border p-3 shadow-sm ${
-                      todo.done
-                        ? "border-emerald-200 bg-emerald-50/60"
-                        : "border-slate-200 bg-white"
-                    }`}
+                    className="list-none"
                   >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-semibold text-slate-900">{todo.title}</p>
-                        <p className="mt-1 text-xs text-slate-600">
-                          Planned {formatHours(todo.hours)}
-                        </p>
+                    <button
+                      type="button"
+                      onClick={() => openCustomTodoModal(todo)}
+                      className={`w-full rounded-md border p-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow ${
+                        todo.done
+                          ? "border-emerald-200 bg-emerald-50/60"
+                          : "border-slate-200 bg-white"
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-semibold text-slate-900">
+                            {todo.title}
+                          </p>
+                          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-600">
+                            <span>Planned {formatHours(todo.hours)}</span>
+                            <span
+                              className={`rounded-full border px-2 py-0.5 ${
+                                todo.done
+                                  ? "border-emerald-300 bg-emerald-100 text-emerald-700"
+                                  : "border-slate-300 bg-slate-100 text-slate-700"
+                              }`}
+                            >
+                              {todo.done ? "Done" : "Open"}
+                            </span>
+                          </div>
+                        </div>
+                        <ChevronRight className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
                       </div>
-                    </div>
-                    <div className="mt-2 flex flex-wrap items-center gap-2">
-                      <label className="inline-flex items-center gap-1 text-xs">
-                        <input
-                          type="checkbox"
-                          checked={todo.done}
-                          onChange={() => toggleCustomTodoDone(todo.id)}
-                        />
-                        Done
-                      </label>
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.5"
-                        value={todo.hours}
-                        onChange={(event) =>
-                          updateCustomTodoHours(todo.id, event.target.value)
-                        }
-                        className="h-7 w-20 rounded-md border border-slate-200 px-2 text-xs"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => removeCustomTodo(todo.id)}
-                        className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-100"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                        Delete
-                      </button>
-                    </div>
+                    </button>
                   </li>
                 ))}
               </ul>
@@ -2185,6 +2247,87 @@ export default function MyWorkPage() {
         </aside>
       </div>
 
+      {customTodoModalId ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={closeCustomTodoModal}
+        >
+          <div
+            className="w-full max-w-lg rounded-xl bg-white shadow-xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-black/10 px-5 py-3">
+              <h2 className="text-lg font-semibold">Todo details</h2>
+              <button
+                type="button"
+                onClick={closeCustomTodoModal}
+                className="rounded-md border border-black/15 p-1.5 hover:bg-black/5"
+                aria-label="Close"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <form onSubmit={saveCustomTodoModal} className="space-y-4 px-5 py-4">
+              <label className="block">
+                <span className="text-sm font-medium">Title</span>
+                <input
+                  type="text"
+                  required
+                  value={customTodoModalTitle}
+                  onChange={(event) => setCustomTodoModalTitle(event.target.value)}
+                  className="mt-1 w-full rounded-md border border-black/15 px-3 py-2 text-sm"
+                />
+              </label>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="block">
+                  <span className="text-sm font-medium">Planned Hours</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.5"
+                    value={customTodoModalHours}
+                    onChange={(event) => setCustomTodoModalHours(event.target.value)}
+                    className="mt-1 w-full rounded-md border border-black/15 px-3 py-2 text-sm"
+                  />
+                </label>
+                <label className="mt-6 inline-flex items-center gap-2 text-sm font-medium sm:mt-7">
+                  <input
+                    type="checkbox"
+                    checked={customTodoModalDone}
+                    onChange={(event) => setCustomTodoModalDone(event.target.checked)}
+                  />
+                  Mark as done
+                </label>
+              </div>
+              <div className="flex items-center justify-between gap-2 border-t border-black/10 pt-3">
+                <button
+                  type="button"
+                  onClick={deleteCustomTodoModal}
+                  className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-100"
+                >
+                  <Trash2 className="h-4 w-4" /> Delete
+                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={closeCustomTodoModal}
+                    className="rounded-md border border-black/20 px-3 py-1.5 text-sm font-medium hover:bg-black/5"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="rounded-md bg-black px-3 py-1.5 text-sm font-medium text-white hover:bg-black/85"
+                  >
+                    Save
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
+
       {modalTaskKey ? (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
@@ -2229,7 +2372,7 @@ export default function MyWorkPage() {
                   />
                 </label>
 
-                <div className="grid gap-3 sm:grid-cols-2">
+                <div className="grid gap-3 sm:grid-cols-3">
                   <label className="block">
                     <span className="text-sm font-medium">Due Date</span>
                     <input
@@ -2237,6 +2380,17 @@ export default function MyWorkPage() {
                       required
                       value={modalDueDate}
                       onChange={(event) => setModalDueDate(event.target.value)}
+                      className="mt-1 w-full rounded-md border border-black/15 px-3 py-2 text-sm"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="text-sm font-medium">Hours Assigned</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.5"
+                      value={modalHoursAssigned}
+                      onChange={(event) => setModalHoursAssigned(event.target.value)}
                       className="mt-1 w-full rounded-md border border-black/15 px-3 py-2 text-sm"
                     />
                   </label>
@@ -2251,6 +2405,63 @@ export default function MyWorkPage() {
                       className="mt-1 w-full rounded-md border border-black/15 px-3 py-2 text-sm"
                     />
                   </label>
+                </div>
+
+                <label className="block">
+                  <span className="text-sm font-medium">Blocker (optional)</span>
+                  <input
+                    type="text"
+                    value={modalBlockerReason}
+                    onChange={(event) => setModalBlockerReason(event.target.value)}
+                    placeholder="What is blocking this task?"
+                    className="mt-1 w-full rounded-md border border-black/15 px-3 py-2 text-sm"
+                  />
+                </label>
+
+                <div className="rounded-md border border-black/10 p-3">
+                  <button
+                    type="button"
+                    onClick={() => setIsModalDependenciesOpen((isOpen) => !isOpen)}
+                    className="flex w-full items-center justify-between gap-2 text-left"
+                  >
+                    <p className="text-sm font-medium">
+                      Dependencies
+                      {modalDependencyTaskIds.length > 0
+                        ? ` (${modalDependencyTaskIds.length})`
+                        : ""}
+                    </p>
+                    {isModalDependenciesOpen ? (
+                      <ChevronDown className="h-4 w-4 text-black/55" />
+                    ) : (
+                      <ChevronRight className="h-4 w-4 text-black/55" />
+                    )}
+                  </button>
+                  {isModalDependenciesOpen ? (
+                    modalProjectTasks.filter((task) => task.id !== modalTaskId).length ===
+                    0 ? (
+                      <p className="mt-2 text-xs text-black/55">
+                        No other tasks available to link.
+                      </p>
+                    ) : (
+                      <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                        {modalProjectTasks
+                          .filter((task) => task.id !== modalTaskId)
+                          .map((task) => (
+                            <label
+                              key={`modal-dependency-${task.id}`}
+                              className="inline-flex items-center gap-2 text-xs text-black/75"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={modalDependencyTaskIds.includes(task.id)}
+                                onChange={() => toggleModalDependencyTask(task.id)}
+                              />
+                              <span className="truncate">{task.title}</span>
+                            </label>
+                          ))}
+                      </div>
+                    )
+                  ) : null}
                 </div>
 
                 <div className="rounded-md border border-black/10 p-3">
