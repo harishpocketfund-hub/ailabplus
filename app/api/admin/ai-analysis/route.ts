@@ -5,14 +5,94 @@ import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/auth/session";
 export const runtime = "nodejs";
 
 type AiContextTaskRow = {
+  id: string;
   title: string;
+  description: string;
   projectName: string;
+  projectKey: string;
   stream: "Marketing" | "Development";
   status: "To Do" | "In Progress" | "Review" | "Done";
   priority: "High" | "Medium" | "Low";
   dueDate: string;
   assignee: string;
+  hoursAssigned: number;
+  timeSpent: number;
+  blockerReason: string;
+  dependencyTaskIds: string[];
+  unresolvedDependencies: number;
+  daysOverdue: number;
   blocked: boolean;
+};
+
+type AiProjectContextRow = {
+  projectKey: string;
+  projectId: string;
+  projectName: string;
+  stream: "Marketing" | "Development";
+  deadline: string;
+  tags: string[];
+  isCompleted: boolean;
+  members: string[];
+  tasksTotal: number;
+  openTasks: number;
+  overdueOpenTasks: number;
+  highPriorityOpenTasks: number;
+  blockedOpenTasks: number;
+  topTaskTitles: string[];
+  topTaskDescriptions: string[];
+};
+
+type AiTeamLoadRow = {
+  name: string;
+  allocatedHours: number;
+  assignedHours: number;
+  openTasks: number;
+  overdueOpenTasks: number;
+  highPriorityOpenTasks: number;
+  timeSpent: number;
+};
+
+type AiCommitRow = {
+  projectName: string;
+  stream: "Marketing" | "Development";
+  changedBy: string;
+  scope: "project" | "task";
+  action: string;
+  field: string;
+  fromValue: string;
+  toValue: string;
+  changedAtIndia: string;
+  changedAtIso: string;
+};
+
+type AiDirectTaskContextRow = {
+  id: string;
+  title: string;
+  description: string;
+  dueDate: string;
+  status: "To Do" | "In Progress" | "Review" | "Done";
+  priority: "High" | "Medium" | "Low";
+  assignee: string;
+  assignedBy: string;
+  assignedAtIso: string;
+  hoursAssigned: number;
+  blockerReason: string;
+  dependencyTaskIds: string[];
+  timeSpent: number;
+};
+
+type AiMyWorkPreferenceRow = {
+  userId: string;
+  userName: string;
+  activeTab: string;
+  assignedByMeTab: string;
+  focusedTaskKeys: string[];
+  customTodos: Array<{
+    title: string;
+    hours: number;
+    done: boolean;
+  }>;
+  updatedAtIso: string;
 };
 
 type AiScopeSnapshot = {
@@ -40,6 +120,12 @@ type AiScopeSnapshot = {
   topOverdue: AiContextTaskRow[];
   topPriorityOpen: AiContextTaskRow[];
   blockedOpen: AiContextTaskRow[];
+  projectsDetailed: AiProjectContextRow[];
+  tasksDetailed: AiContextTaskRow[];
+  teamLoad: AiTeamLoadRow[];
+  commitsRecent: AiCommitRow[];
+  directTasks: AiDirectTaskContextRow[];
+  myWorkPreferences: AiMyWorkPreferenceRow[];
 };
 
 type RequestBody = {
@@ -60,8 +146,11 @@ function isAiContextTaskRow(value: unknown): value is AiContextTaskRow {
   }
 
   return (
+    typeof value.id === "string" &&
     typeof value.title === "string" &&
+    typeof value.description === "string" &&
     typeof value.projectName === "string" &&
+    typeof value.projectKey === "string" &&
     (value.stream === "Marketing" || value.stream === "Development") &&
     (value.status === "To Do" ||
       value.status === "In Progress" ||
@@ -70,7 +159,127 @@ function isAiContextTaskRow(value: unknown): value is AiContextTaskRow {
     (value.priority === "High" || value.priority === "Medium" || value.priority === "Low") &&
     typeof value.dueDate === "string" &&
     typeof value.assignee === "string" &&
+    typeof value.hoursAssigned === "number" &&
+    typeof value.timeSpent === "number" &&
+    typeof value.blockerReason === "string" &&
+    Array.isArray(value.dependencyTaskIds) &&
+    value.dependencyTaskIds.every((id) => typeof id === "string") &&
+    typeof value.unresolvedDependencies === "number" &&
+    typeof value.daysOverdue === "number" &&
     typeof value.blocked === "boolean"
+  );
+}
+
+function isAiProjectContextRow(value: unknown): value is AiProjectContextRow {
+  if (!isObjectRecord(value)) {
+    return false;
+  }
+
+  return (
+    typeof value.projectKey === "string" &&
+    typeof value.projectId === "string" &&
+    typeof value.projectName === "string" &&
+    (value.stream === "Marketing" || value.stream === "Development") &&
+    typeof value.deadline === "string" &&
+    Array.isArray(value.tags) &&
+    value.tags.every((tag) => typeof tag === "string") &&
+    typeof value.isCompleted === "boolean" &&
+    Array.isArray(value.members) &&
+    value.members.every((member) => typeof member === "string") &&
+    typeof value.tasksTotal === "number" &&
+    typeof value.openTasks === "number" &&
+    typeof value.overdueOpenTasks === "number" &&
+    typeof value.highPriorityOpenTasks === "number" &&
+    typeof value.blockedOpenTasks === "number" &&
+    Array.isArray(value.topTaskTitles) &&
+    value.topTaskTitles.every((taskTitle) => typeof taskTitle === "string") &&
+    Array.isArray(value.topTaskDescriptions) &&
+    value.topTaskDescriptions.every((taskDescription) => typeof taskDescription === "string")
+  );
+}
+
+function isAiTeamLoadRow(value: unknown): value is AiTeamLoadRow {
+  if (!isObjectRecord(value)) {
+    return false;
+  }
+
+  return (
+    typeof value.name === "string" &&
+    typeof value.allocatedHours === "number" &&
+    typeof value.assignedHours === "number" &&
+    typeof value.openTasks === "number" &&
+    typeof value.overdueOpenTasks === "number" &&
+    typeof value.highPriorityOpenTasks === "number" &&
+    typeof value.timeSpent === "number"
+  );
+}
+
+function isAiCommitRow(value: unknown): value is AiCommitRow {
+  if (!isObjectRecord(value)) {
+    return false;
+  }
+
+  return (
+    typeof value.projectName === "string" &&
+    (value.stream === "Marketing" || value.stream === "Development") &&
+    typeof value.changedBy === "string" &&
+    (value.scope === "project" || value.scope === "task") &&
+    typeof value.action === "string" &&
+    typeof value.field === "string" &&
+    typeof value.fromValue === "string" &&
+    typeof value.toValue === "string" &&
+    typeof value.changedAtIndia === "string" &&
+    typeof value.changedAtIso === "string"
+  );
+}
+
+function isAiDirectTaskContextRow(value: unknown): value is AiDirectTaskContextRow {
+  if (!isObjectRecord(value)) {
+    return false;
+  }
+
+  return (
+    typeof value.id === "string" &&
+    typeof value.title === "string" &&
+    typeof value.description === "string" &&
+    typeof value.dueDate === "string" &&
+    (value.status === "To Do" ||
+      value.status === "In Progress" ||
+      value.status === "Review" ||
+      value.status === "Done") &&
+    (value.priority === "High" || value.priority === "Medium" || value.priority === "Low") &&
+    typeof value.assignee === "string" &&
+    typeof value.assignedBy === "string" &&
+    typeof value.assignedAtIso === "string" &&
+    typeof value.hoursAssigned === "number" &&
+    typeof value.blockerReason === "string" &&
+    Array.isArray(value.dependencyTaskIds) &&
+    value.dependencyTaskIds.every((dependencyId) => typeof dependencyId === "string") &&
+    typeof value.timeSpent === "number"
+  );
+}
+
+function isAiMyWorkPreferenceRow(value: unknown): value is AiMyWorkPreferenceRow {
+  if (!isObjectRecord(value)) {
+    return false;
+  }
+
+  return (
+    typeof value.userId === "string" &&
+    typeof value.userName === "string" &&
+    typeof value.activeTab === "string" &&
+    typeof value.assignedByMeTab === "string" &&
+    Array.isArray(value.focusedTaskKeys) &&
+    value.focusedTaskKeys.every((taskKey) => typeof taskKey === "string") &&
+    Array.isArray(value.customTodos) &&
+    value.customTodos.every(
+      (todo) =>
+        isObjectRecord(todo) &&
+        typeof todo.title === "string" &&
+        typeof todo.hours === "number" &&
+        typeof todo.done === "boolean"
+    ) &&
+    typeof value.updatedAtIso === "string"
   );
 }
 
@@ -110,7 +319,19 @@ function isAiScopeSnapshot(value: unknown): value is AiScopeSnapshot {
   return (
     value.topOverdue.every(isAiContextTaskRow) &&
     value.topPriorityOpen.every(isAiContextTaskRow) &&
-    value.blockedOpen.every(isAiContextTaskRow)
+    value.blockedOpen.every(isAiContextTaskRow) &&
+    Array.isArray(value.projectsDetailed) &&
+    value.projectsDetailed.every(isAiProjectContextRow) &&
+    Array.isArray(value.tasksDetailed) &&
+    value.tasksDetailed.every(isAiContextTaskRow) &&
+    Array.isArray(value.teamLoad) &&
+    value.teamLoad.every(isAiTeamLoadRow) &&
+    Array.isArray(value.commitsRecent) &&
+    value.commitsRecent.every(isAiCommitRow) &&
+    Array.isArray(value.directTasks) &&
+    value.directTasks.every(isAiDirectTaskContextRow) &&
+    Array.isArray(value.myWorkPreferences) &&
+    value.myWorkPreferences.every(isAiMyWorkPreferenceRow)
   );
 }
 
@@ -126,20 +347,17 @@ async function getSessionUser() {
 
 function buildSystemPrompt(): string {
   return [
-    "You are an internal project-operations analyst for a company workspace.",
-    "Your job is to analyze project and team data and return concise, structured, executive-grade insights.",
+    "You are an internal project and delivery analyst.",
+    "Use ONLY the provided context. Never invent or assume missing details.",
     "",
-    "Rules:",
-    "1. Use ONLY the provided context data. Do not invent facts.",
-    "2. If data is missing, explicitly say \"Data not available\".",
-    "3. Keep output highly structured and scannable.",
-    "4. Use short bullet points, no paragraphs longer than 2 lines.",
-    "5. Prioritize actionability over generic commentary.",
-    "6. Highlight risk early.",
-    "7. Be numerically explicit whenever possible.",
-    "8. If there are zero tasks/projects in scope, return a clear empty-state analysis and next setup actions.",
+    "Hard constraints:",
+    "1) No hallucinations. If evidence is missing, say \"Not enough evidence\".",
+    "2) Do not predict consequences unless directly supported by explicit blockers, dependencies, overdue age, or priority data.",
+    "3) Prefer specific task/project names and metrics over generic statements.",
+    "4) Keep language clear and executive-friendly.",
+    "5) If a section has no evidence, return exactly: \"No evidence-backed points.\"",
     "",
-    "Required output format (exact section order):",
+    "Required output format and order:",
     "## Scope",
     "- Team member scope: ...",
     "- Project scope: ...",
@@ -147,38 +365,46 @@ function buildSystemPrompt(): string {
     "- Tasks analyzed: ...",
     "",
     "## Executive Summary",
-    "- 3-5 bullets on current delivery health.",
-    "- Include overall trend: stable / improving / degrading (based only on provided counts).",
+    "### Project Narrative",
+    "- For each project in scope (max 8): start bullet with project name and describe current work in fluent English using task titles/descriptions.",
+    "- Do not include projects with no tasks unless explicitly relevant.",
+    "### Status",
+    "- Open tasks, overdue tasks, high-priority open, blocked/dependency open.",
+    "- Include overdue age where available (e.g., \"overdue by 3 days\").",
+    "- Overall trend: stable / improving / degrading, and WHY using only counts and commit/change signals in context.",
     "",
     "## Critical Risks",
-    "- Bullets sorted by severity.",
-    "- Include overdue pressure, high-priority open load, blocked/dependency load.",
-    "- Each bullet must include impact + likely consequence.",
+    "- Include ONLY evidence-backed risks.",
+    "- Allowed evidence: overdue age, explicit blockerReason text, unresolved dependencies count, high priority + overdue, high load from allocated vs assigned.",
+    "- Format: Task or Project | Evidence | Operational impact.",
+    "- Do NOT add hypothetical \"likely consequence\" lines.",
     "",
     "## Bottlenecks",
-    "- Status-pile insights from To Do / In Progress / Review / Done counts.",
-    "- Identify the largest queue and explain what it implies.",
+    "- Use status counts and age/overdue distribution.",
+    "- Mention largest queue only if it creates measurable delay risk.",
+    "- If queue counts are low and healthy, say so briefly.",
     "",
     "## Team Signals",
-    "- Focus on assignee load, ownership gaps, unassigned work, concentration risk.",
-    "- Mention specific names only if present in context.",
+    "- Use teamLoad evidence (allocatedHours vs assignedHours, overdueOpenTasks, highPriorityOpenTasks).",
+    "- Mention concentration or overload ONLY when metrics support it.",
+    "- If allocatedHours is missing/zero, avoid burnout claims.",
     "",
     "## Immediate Actions (Next 7 Days)",
-    "- Numbered list (max 7 actions).",
-    "- Each action must be specific, measurable, and tied to a risk/bottleneck.",
-    "- Format: Action | Owner suggestion | Expected impact.",
+    "- Provide 0 to 5 actions.",
+    "- Include only evidence-backed actions tied to concrete tasks/projects.",
+    "- No generic management advice.",
+    "- Format: 1) Action | Owner suggestion | Why now (evidence).",
     "",
     "## Priority Task Watchlist",
-    "- Up to 8 tasks.",
-    "- For each: Title | Project | Assignee | Status | Priority | Due date | Why it matters now.",
-    "",
-    "## Questions / Data Gaps",
-    "- List missing data that would improve analysis quality.",
+    "- Include only tasks with strong evidence (overdue, blocked, unresolved dependencies, high priority near due date).",
+    "- Up to 8 tasks; if none, return \"No evidence-backed points.\"",
+    "- Format: Title | Project | Assignee | Status | Priority | Due date | Evidence.",
     "",
     "Style constraints:",
     "- Professional, direct, non-hype tone.",
     "- No markdown tables.",
     "- No filler text.",
+    "- No speculative language.",
   ].join("\n");
 }
 
@@ -198,10 +424,13 @@ function buildUserPrompt(question: string, context: AiScopeSnapshot): string {
 function buildCompactSummarySystemPrompt(): string {
   return [
     "You are an internal operations analyst.",
-    "Generate a single concise portfolio summary in 50 words or less.",
-    "Use only provided data.",
+    "Generate exactly one concise portfolio summary in 60 to 90 words.",
+    "Use ONLY provided evidence from context JSON.",
     "Mention both Marketing and Development explicitly.",
-    "Include one key risk and one immediate focus.",
+    "Do not hallucinate, speculate, or infer unsupported consequences.",
+    "Do not invent risk if there is no explicit evidence (overdue, blockerReason, unresolved dependency, high-priority open, or measurable load mismatch).",
+    "Include one evidence-backed risk and one immediate focus based on explicit metrics.",
+    "Use fluent executive English.",
     "No headings. No markdown. No bullet list.",
   ].join("\n");
 }
@@ -215,7 +444,7 @@ function buildCompactSummaryUserPrompt(question: string, context: AiScopeSnapsho
     "Context JSON:",
     contextJson,
     "",
-    "Return one concise summary sentence/paragraph only.",
+    "Return one concise paragraph only, 60 to 90 words, evidence-backed.",
   ].join("\n");
 }
 
@@ -281,7 +510,7 @@ async function requestOpenAiAnswer(
     },
     body: JSON.stringify({
       model,
-      temperature: 0.2,
+      temperature: 0.05,
       messages: [
         {
           role: "system",

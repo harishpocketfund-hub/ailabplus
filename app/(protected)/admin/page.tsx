@@ -67,12 +67,15 @@ import {
   parseDevelopmentProjectCommitLogs,
   subscribeToDevelopmentProjectCommitLogs,
 } from "@/lib/development-project-commits";
+import { parseDirectTasks, type DirectTask } from "@/lib/direct-tasks";
 
 const STATUS_ORDER = ["To Do", "In Progress", "Review", "Done"] as const;
 const PRIORITY_ORDER = ["High", "Medium", "Low"] as const;
 const WEEKDAY_ORDER = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const DAY_MS = 24 * 60 * 60 * 1000;
+const SUMMARY_MIN_WORDS = 60;
+const SUMMARY_MAX_WORDS = 90;
 
 const subscribeToHydration = () => () => {};
 const getHydratedSnapshot = () => true;
@@ -100,6 +103,7 @@ type UnifiedTask = {
   projectName: string;
   stream: Workstream;
   title: string;
+  description: string;
   dueDate: string;
   status: TaskStatus;
   priority: TaskPriority;
@@ -152,14 +156,94 @@ type GeneratedSummaryEntry = {
 };
 
 type AiContextTaskRow = {
+  id: string;
   title: string;
+  description: string;
   projectName: string;
+  projectKey: string;
   stream: Workstream;
   status: TaskStatus;
   priority: TaskPriority;
   dueDate: string;
   assignee: string;
+  hoursAssigned: number;
+  timeSpent: number;
+  blockerReason: string;
+  dependencyTaskIds: string[];
+  unresolvedDependencies: number;
+  daysOverdue: number;
   blocked: boolean;
+};
+
+type AiProjectContextRow = {
+  projectKey: string;
+  projectId: string;
+  projectName: string;
+  stream: Workstream;
+  deadline: string;
+  tags: string[];
+  isCompleted: boolean;
+  members: string[];
+  tasksTotal: number;
+  openTasks: number;
+  overdueOpenTasks: number;
+  highPriorityOpenTasks: number;
+  blockedOpenTasks: number;
+  topTaskTitles: string[];
+  topTaskDescriptions: string[];
+};
+
+type AiTeamLoadRow = {
+  name: string;
+  allocatedHours: number;
+  assignedHours: number;
+  openTasks: number;
+  overdueOpenTasks: number;
+  highPriorityOpenTasks: number;
+  timeSpent: number;
+};
+
+type AiCommitRow = {
+  projectName: string;
+  stream: Workstream;
+  changedBy: string;
+  scope: "project" | "task";
+  action: string;
+  field: string;
+  fromValue: string;
+  toValue: string;
+  changedAtIndia: string;
+  changedAtIso: string;
+};
+
+type AiDirectTaskContextRow = {
+  id: string;
+  title: string;
+  description: string;
+  dueDate: string;
+  status: TaskStatus;
+  priority: TaskPriority;
+  assignee: string;
+  assignedBy: string;
+  assignedAtIso: string;
+  hoursAssigned: number;
+  blockerReason: string;
+  dependencyTaskIds: string[];
+  timeSpent: number;
+};
+
+type AiMyWorkPreferenceRow = {
+  userId: string;
+  userName: string;
+  activeTab: string;
+  assignedByMeTab: string;
+  focusedTaskKeys: string[];
+  customTodos: Array<{
+    title: string;
+    hours: number;
+    done: boolean;
+  }>;
+  updatedAtIso: string;
 };
 
 type AiScopeSnapshot = {
@@ -182,6 +266,12 @@ type AiScopeSnapshot = {
   topOverdue: AiContextTaskRow[];
   topPriorityOpen: AiContextTaskRow[];
   blockedOpen: AiContextTaskRow[];
+  projectsDetailed: AiProjectContextRow[];
+  tasksDetailed: AiContextTaskRow[];
+  teamLoad: AiTeamLoadRow[];
+  commitsRecent: AiCommitRow[];
+  directTasks: AiDirectTaskContextRow[];
+  myWorkPreferences: AiMyWorkPreferenceRow[];
 };
 
 function toIsoDate(date: Date): string {
@@ -263,12 +353,52 @@ function getDaysFromToday(date: string, today: string): number | null {
   return Math.round((dueMs - todayMs) / DAY_MS);
 }
 
+function toWordArray(value: string): string[] {
+  return value.trim().split(/\s+/).filter((word) => word.length > 0);
+}
+
 function truncateToWordCount(value: string, maxWords: number): string {
   const words = value.trim().split(/\s+/).filter((word) => word.length > 0);
   if (words.length <= maxWords) {
     return words.join(" ");
   }
   return `${words.slice(0, maxWords).join(" ")}...`;
+}
+
+function ensureSummaryWordRange(
+  value: string,
+  context: AiScopeSnapshot,
+  minWords: number,
+  maxWords: number
+): string {
+  let normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    normalized = "No reliable summary could be generated from current evidence.";
+  }
+
+  if (toWordArray(normalized).length > maxWords) {
+    normalized = truncateToWordCount(normalized, maxWords);
+  }
+
+  const evidenceSupplements = [
+    `Current scope includes ${context.summary.open} open tasks and ${context.summary.overdue} overdue tasks, with ${context.summary.highPriorityOpen} high-priority open items and ${context.summary.blockedOpen} explicitly blocked or dependency-constrained items.`,
+    `Status mix is To Do ${context.statusCounts["To Do"]}, In Progress ${context.statusCounts["In Progress"]}, Review ${context.statusCounts.Review}, and Done ${context.statusCounts.Done}.`,
+    `Input evidence covers ${context.projectsDetailed.length} scoped projects, ${context.teamLoad.length} team-load rows, ${context.commitsRecent.length} recent commits, ${context.directTasks.length} direct assignments, and ${context.myWorkPreferences.length} My Work preference snapshots.`,
+  ];
+
+  let nextText = normalized;
+  for (const supplement of evidenceSupplements) {
+    if (toWordArray(nextText).length >= minWords) {
+      break;
+    }
+    nextText = `${nextText} ${supplement}`.trim();
+  }
+
+  if (toWordArray(nextText).length > maxWords) {
+    nextText = truncateToWordCount(nextText, maxWords);
+  }
+
+  return nextText;
 }
 
 function formatDateTimeWithIndiaLocale(isoValue: string): string {
@@ -392,9 +522,11 @@ export default function AdminPage() {
   const [isAiSending, setIsAiSending] = useState(false);
   const [aiServiceError, setAiServiceError] = useState<string | null>(null);
   const [aiMessages, setAiMessages] = useState<AiMessage[]>([]);
-  const [generatedSummaries, setGeneratedSummaries] = useState<GeneratedSummaryEntry[]>([]);
+  const [generatedSummary, setGeneratedSummary] = useState<GeneratedSummaryEntry | null>(null);
   const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
   const [generatedSummaryError, setGeneratedSummaryError] = useState<string | null>(null);
+  const [directTasks, setDirectTasks] = useState<DirectTask[]>([]);
+  const [myWorkPreferences, setMyWorkPreferences] = useState<AiMyWorkPreferenceRow[]>([]);
   const aiMessageCounterRef = useRef(1);
   const aiQuickQuestions = [
     {
@@ -463,6 +595,141 @@ export default function AdminPage() {
   }, []);
 
   useEffect(() => {
+    let isMounted = true;
+
+    const loadDirectTasks = async () => {
+      try {
+        const response = await fetch("/api/direct-tasks", {
+          method: "GET",
+          cache: "no-store",
+        });
+        const payload = (await response.json().catch(() => ({}))) as {
+          tasks?: unknown;
+        };
+
+        if (!response.ok) {
+          if (isMounted) {
+            setDirectTasks([]);
+          }
+          return;
+        }
+
+        if (isMounted) {
+          setDirectTasks(parseDirectTasks(payload.tasks));
+        }
+      } catch {
+        if (isMounted) {
+          setDirectTasks([]);
+        }
+      }
+    };
+
+    void loadDirectTasks();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadMyWorkPreferences = async () => {
+      try {
+        const response = await fetch("/api/admin/my-work-preferences", {
+          method: "GET",
+          cache: "no-store",
+        });
+        const payload = (await response.json().catch(() => ({}))) as {
+          preferences?: unknown;
+        };
+
+        if (!response.ok || !Array.isArray(payload.preferences)) {
+          if (isMounted) {
+            setMyWorkPreferences([]);
+          }
+          return;
+        }
+
+        const rows = payload.preferences
+          .map((row) => {
+            if (!row || typeof row !== "object") {
+              return null;
+            }
+            const typedRow = row as Partial<AiMyWorkPreferenceRow>;
+            if (
+              typeof typedRow.userId !== "string" ||
+              typeof typedRow.userName !== "string" ||
+              typeof typedRow.activeTab !== "string" ||
+              typeof typedRow.assignedByMeTab !== "string" ||
+              !Array.isArray(typedRow.focusedTaskKeys) ||
+              !Array.isArray(typedRow.customTodos) ||
+              typeof typedRow.updatedAtIso !== "string"
+            ) {
+              return null;
+            }
+
+            return {
+              userId: typedRow.userId,
+              userName: typedRow.userName,
+              activeTab: typedRow.activeTab,
+              assignedByMeTab: typedRow.assignedByMeTab,
+              focusedTaskKeys: typedRow.focusedTaskKeys.filter(
+                (value): value is string => typeof value === "string"
+              ),
+              customTodos: typedRow.customTodos
+                .map((todo) => {
+                  if (!todo || typeof todo !== "object") {
+                    return null;
+                  }
+                  const typedTodo = todo as {
+                    title?: unknown;
+                    hours?: unknown;
+                    done?: unknown;
+                  };
+                  if (
+                    typeof typedTodo.title !== "string" ||
+                    typeof typedTodo.hours !== "number" ||
+                    typeof typedTodo.done !== "boolean"
+                  ) {
+                    return null;
+                  }
+                  return {
+                    title: typedTodo.title,
+                    hours: Number.isFinite(typedTodo.hours) ? typedTodo.hours : 0,
+                    done: typedTodo.done,
+                  };
+                })
+                .filter(
+                  (
+                    todo
+                  ): todo is {
+                    title: string;
+                    hours: number;
+                    done: boolean;
+                  } => todo !== null
+                ),
+              updatedAtIso: typedRow.updatedAtIso,
+            } satisfies AiMyWorkPreferenceRow;
+          })
+          .filter((row): row is AiMyWorkPreferenceRow => row !== null);
+
+        if (isMounted) {
+          setMyWorkPreferences(rows);
+        }
+      } catch {
+        if (isMounted) {
+          setMyWorkPreferences([]);
+        }
+      }
+    };
+
+    void loadMyWorkPreferences();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
     if (!isResourceModalOpen && !isAiAnalysisModalOpen) {
       return;
     }
@@ -520,6 +787,7 @@ export default function AdminPage() {
           projectName: project.name,
           stream: "Marketing" as const,
           title: task.title,
+          description: task.description,
           dueDate: task.dueDate,
           status: task.status,
           priority: task.priority,
@@ -542,6 +810,7 @@ export default function AdminPage() {
           projectName: project.name,
           stream: "Development" as const,
           title: task.title,
+          description: task.description,
           dueDate: task.dueDate,
           status: task.status,
           priority: task.priority,
@@ -1097,6 +1366,7 @@ export default function AdminPage() {
           projectName: project.name,
           stream: "Marketing" as const,
           title: task.title,
+          description: task.description,
           dueDate: task.dueDate,
           status: task.status,
           priority: task.priority,
@@ -1119,6 +1389,7 @@ export default function AdminPage() {
           projectName: project.name,
           stream: "Development" as const,
           title: task.title,
+          description: task.description,
           dueDate: task.dueDate,
           status: task.status,
           priority: task.priority,
@@ -1228,6 +1499,7 @@ export default function AdminPage() {
   }): AiScopeSnapshot => {
     const scopeMember = overrides?.member ?? aiMemberValue;
     const scopeProjectKey = overrides?.projectKey ?? aiProjectValue;
+    const today = aiScope.today;
 
     const scopedProjects = aiScope.projects.filter((project) => {
       if (scopeProjectKey !== "All" && project.key !== scopeProjectKey) {
@@ -1239,6 +1511,7 @@ export default function AdminPage() {
       return true;
     });
     const scopedProjectKeys = new Set(scopedProjects.map((project) => project.key));
+
     const scopedTasks = aiScope.tasks.filter((task) => {
       if (!scopedProjectKeys.has(task.projectKey)) {
         return false;
@@ -1249,19 +1522,123 @@ export default function AdminPage() {
       return true;
     });
 
-    const openTasks = scopedTasks.filter((task) => task.status !== "Done");
-    const overdueTasks = openTasks
-      .filter((task) => isOverdue(task, aiScope.today))
-      .sort((a, b) => (a.dueDate || "9999-99-99").localeCompare(b.dueDate || "9999-99-99"));
-    const dueTodayTasks = openTasks.filter((task) => task.dueDate === aiScope.today);
-    const dueThisWeekTasks = openTasks.filter((task) => {
-      const days = getDaysFromToday(task.dueDate, aiScope.today);
+    const statusByTaskIdByProjectKey = new Map<string, Map<string, TaskStatus>>();
+    aiScope.tasks.forEach((task) => {
+      if (!statusByTaskIdByProjectKey.has(task.projectKey)) {
+        statusByTaskIdByProjectKey.set(task.projectKey, new Map<string, TaskStatus>());
+      }
+      statusByTaskIdByProjectKey.get(task.projectKey)?.set(task.id, task.status);
+    });
+
+    const getUnresolvedDependencies = (task: UnifiedTask): number => {
+      const projectTaskStatuses = statusByTaskIdByProjectKey.get(task.projectKey);
+      if (!projectTaskStatuses) {
+        return task.dependencyTaskIds.length;
+      }
+
+      return task.dependencyTaskIds.reduce((count, dependencyTaskId) => {
+        const dependencyStatus = projectTaskStatuses.get(dependencyTaskId);
+        if (!dependencyStatus || dependencyStatus !== "Done") {
+          return count + 1;
+        }
+        return count;
+      }, 0);
+    };
+
+    const toContextTaskRow = (task: UnifiedTask): AiContextTaskRow => {
+      const unresolvedDependencies = getUnresolvedDependencies(task);
+      const blockedByReason = task.blockerReason.trim().length > 0;
+      const blocked = blockedByReason || unresolvedDependencies > 0;
+      const daysFromToday = getDaysFromToday(task.dueDate, today);
+      const daysOverdue =
+        task.status !== "Done" &&
+        typeof daysFromToday === "number" &&
+        daysFromToday < 0
+          ? Math.abs(daysFromToday)
+          : 0;
+
+      return {
+        id: task.id,
+        title: task.title,
+        description: task.description,
+        projectName: task.projectName,
+        projectKey: task.projectKey,
+        stream: task.stream,
+        status: task.status,
+        priority: task.priority,
+        dueDate: task.dueDate,
+        assignee: task.assignee?.trim() || "Unassigned",
+        hoursAssigned: task.hoursAssigned,
+        timeSpent: task.timeSpent,
+        blockerReason: task.blockerReason,
+        dependencyTaskIds: task.dependencyTaskIds,
+        unresolvedDependencies,
+        daysOverdue,
+        blocked,
+      };
+    };
+
+    const tasksDetailed = scopedTasks
+      .slice()
+      .sort((a, b) => {
+        const dueA = a.dueDate || "9999-99-99";
+        const dueB = b.dueDate || "9999-99-99";
+        if (dueA !== dueB) {
+          return dueA.localeCompare(dueB);
+        }
+        const priorityA = a.priority === "High" ? 0 : a.priority === "Medium" ? 1 : 2;
+        const priorityB = b.priority === "High" ? 0 : b.priority === "Medium" ? 1 : 2;
+        if (priorityA !== priorityB) {
+          return priorityA - priorityB;
+        }
+        return a.title.localeCompare(b.title);
+      })
+      .map(toContextTaskRow);
+
+    const openTasksDetailed = tasksDetailed.filter((task) => task.status !== "Done");
+    const overdueTasksDetailed = openTasksDetailed
+      .filter((task) => task.daysOverdue > 0)
+      .sort((a, b) => b.daysOverdue - a.daysOverdue);
+    const dueTodayTasks = openTasksDetailed.filter((task) => task.dueDate === today);
+    const dueThisWeekTasks = openTasksDetailed.filter((task) => {
+      const days = getDaysFromToday(task.dueDate, today);
       return days !== null && days > 0 && days <= 7;
     });
-    const highPriorityOpen = openTasks.filter((task) => task.priority === "High");
-    const blockedTasks = openTasks.filter(
-      (task) => task.blockerReason.trim().length > 0 || task.dependencyTaskIds.length > 0
-    );
+    const highPriorityOpen = openTasksDetailed.filter((task) => task.priority === "High");
+    const blockedTasks = openTasksDetailed.filter((task) => task.blocked);
+
+    const topPriorityOpen = openTasksDetailed
+      .slice()
+      .sort((a, b) => {
+        const priorityA = a.priority === "High" ? 0 : a.priority === "Medium" ? 1 : 2;
+        const priorityB = b.priority === "High" ? 0 : b.priority === "Medium" ? 1 : 2;
+        if (priorityA !== priorityB) {
+          return priorityA - priorityB;
+        }
+        const dueA = a.dueDate || "9999-99-99";
+        const dueB = b.dueDate || "9999-99-99";
+        if (dueA !== dueB) {
+          return dueA.localeCompare(dueB);
+        }
+        return a.title.localeCompare(b.title);
+      })
+      .slice(0, 16);
+
+    const topOverdue = overdueTasksDetailed.slice(0, 16);
+    const blockedOpen = blockedTasks
+      .slice()
+      .sort((a, b) => {
+        const dueA = a.dueDate || "9999-99-99";
+        const dueB = b.dueDate || "9999-99-99";
+        if (dueA !== dueB) {
+          return dueA.localeCompare(dueB);
+        }
+        return a.title.localeCompare(b.title);
+      })
+      .slice(0, 16);
+
+    const openTasks = scopedTasks.filter((task) => task.status !== "Done");
+    const overdueTasks = openTasks.filter((task) => isOverdue(task, today));
 
     const selectedProject =
       scopeProjectKey === "All"
@@ -1282,36 +1659,176 @@ export default function AdminPage() {
       statusCounts[task.status] += 1;
     });
 
-    const toContextTaskRow = (task: UnifiedTask): AiContextTaskRow => ({
-      title: task.title,
-      projectName: task.projectName,
-      stream: task.stream,
-      status: task.status,
-      priority: task.priority,
-      dueDate: task.dueDate,
-      assignee: task.assignee?.trim() || "Unassigned",
-      blocked: Boolean(task.blockerReason.trim()) || task.dependencyTaskIds.length > 0,
+    const projectsDetailed = scopedProjects.map((project) => {
+      const projectTasks = tasksDetailed.filter((task) => task.projectKey === project.key);
+      const openProjectTasks = projectTasks.filter((task) => task.status !== "Done");
+      const projectMembers =
+        project.stream === "Marketing"
+          ? (marketingMembersByProject[project.id] ?? []).map((member) => member.name.trim())
+          : (developmentMembersByProject[project.id] ?? []).map((member) => member.name.trim());
+
+      return {
+        projectKey: project.key,
+        projectId: project.id,
+        projectName: project.name,
+        stream: project.stream,
+        deadline: project.deadline,
+        tags: project.tags,
+        isCompleted: project.isCompleted,
+        members: [...new Set([...project.memberNames, ...projectMembers])].filter(Boolean),
+        tasksTotal: projectTasks.length,
+        openTasks: openProjectTasks.length,
+        overdueOpenTasks: openProjectTasks.filter((task) => task.daysOverdue > 0).length,
+        highPriorityOpenTasks: openProjectTasks.filter((task) => task.priority === "High").length,
+        blockedOpenTasks: openProjectTasks.filter((task) => task.blocked).length,
+        topTaskTitles: openProjectTasks.slice(0, 12).map((task) => task.title),
+        topTaskDescriptions: openProjectTasks
+          .map((task) => task.description.trim())
+          .filter((description) => description.length > 0)
+          .slice(0, 12),
+      } satisfies AiProjectContextRow;
     });
 
-    const topPriorityOpen = openTasks
-      .slice()
-      .sort((a, b) => {
-        const priorityRankA = a.priority === "High" ? 0 : a.priority === "Medium" ? 1 : 2;
-        const priorityRankB = b.priority === "High" ? 0 : b.priority === "Medium" ? 1 : 2;
-        if (priorityRankA !== priorityRankB) {
-          return priorityRankA - priorityRankB;
-        }
-        return (a.dueDate || "9999-99-99").localeCompare(b.dueDate || "9999-99-99");
-      })
-      .slice(0, 8)
-      .map(toContextTaskRow);
+    const teamLoadMap = new Map<string, AiTeamLoadRow>();
+    const touchTeamMember = (name: string): AiTeamLoadRow => {
+      const cleanName = name.trim();
+      const existing = teamLoadMap.get(cleanName);
+      if (existing) {
+        return existing;
+      }
+      const created: AiTeamLoadRow = {
+        name: cleanName,
+        allocatedHours: 0,
+        assignedHours: 0,
+        openTasks: 0,
+        overdueOpenTasks: 0,
+        highPriorityOpenTasks: 0,
+        timeSpent: 0,
+      };
+      teamLoadMap.set(cleanName, created);
+      return created;
+    };
 
-    const topOverdue = overdueTasks.slice(0, 8).map(toContextTaskRow);
-    const blockedOpen = blockedTasks
-      .slice()
-      .sort((a, b) => (a.dueDate || "9999-99-99").localeCompare(b.dueDate || "9999-99-99"))
-      .slice(0, 8)
-      .map(toContextTaskRow);
+    scopedProjects.forEach((project) => {
+      const members =
+        project.stream === "Marketing"
+          ? marketingMembersByProject[project.id] ?? []
+          : developmentMembersByProject[project.id] ?? [];
+      members.forEach((member) => {
+        const memberName = member.name.trim();
+        if (!memberName) {
+          return;
+        }
+        const row = touchTeamMember(memberName);
+        row.allocatedHours += member.hoursAllocated;
+      });
+    });
+
+    tasksDetailed.forEach((task) => {
+      if (!task.assignee || task.assignee === "Unassigned") {
+        return;
+      }
+      const row = touchTeamMember(task.assignee);
+      row.assignedHours += task.hoursAssigned;
+      row.timeSpent += task.timeSpent;
+      if (task.status !== "Done") {
+        row.openTasks += 1;
+        if (task.daysOverdue > 0) {
+          row.overdueOpenTasks += 1;
+        }
+        if (task.priority === "High") {
+          row.highPriorityOpenTasks += 1;
+        }
+      }
+    });
+
+    const teamLoad = [...teamLoadMap.values()]
+      .filter((row) => row.assignedHours > 0 || row.allocatedHours > 0)
+      .sort((a, b) => {
+        if (a.overdueOpenTasks !== b.overdueOpenTasks) {
+          return b.overdueOpenTasks - a.overdueOpenTasks;
+        }
+        if (a.openTasks !== b.openTasks) {
+          return b.openTasks - a.openTasks;
+        }
+        return a.name.localeCompare(b.name);
+      });
+
+    const allCommits: AiCommitRow[] = [
+      ...marketingCommits.map((commit) => ({
+        projectName: commit.projectName,
+        stream: "Marketing" as const,
+        changedBy: commit.changedBy,
+        scope: commit.scope ?? "project",
+        action: commit.action ?? "updated",
+        field: commit.field,
+        fromValue: commit.fromValue,
+        toValue: commit.toValue,
+        changedAtIndia: commit.changedAtIndia,
+        changedAtIso: commit.changedAtIso,
+      })),
+      ...developmentCommits.map((commit) => ({
+        projectName: commit.projectName,
+        stream: "Development" as const,
+        changedBy: commit.changedBy,
+        scope: commit.scope ?? "project",
+        action: commit.action ?? "updated",
+        field: commit.field,
+        fromValue: commit.fromValue,
+        toValue: commit.toValue,
+        changedAtIndia: commit.changedAtIndia,
+        changedAtIso: commit.changedAtIso,
+      })),
+    ];
+
+    const scopedProjectNameSet = new Set(scopedProjects.map((project) => project.name));
+    const commitsRecent = allCommits
+      .filter((commit) => {
+        if (scopeProjectKey !== "All" && !scopedProjectNameSet.has(commit.projectName)) {
+          return false;
+        }
+        if (scopeMember !== "All" && normalizeName(commit.changedBy) !== normalizeName(scopeMember)) {
+          return false;
+        }
+        return true;
+      })
+      .sort((a, b) => parseTime(b.changedAtIso) - parseTime(a.changedAtIso))
+      .slice(0, 120);
+
+    const directTasksContext = directTasks
+      .filter((task) => {
+        if (scopeMember !== "All") {
+          const assignee = task.assignee?.trim() ?? "";
+          const assignedBy = task.assignedByName?.trim() ?? "";
+          return normalizeName(assignee) === normalizeName(scopeMember) || normalizeName(assignedBy) === normalizeName(scopeMember);
+        }
+        return true;
+      })
+      .map((task) => ({
+        id: task.id,
+        title: task.title,
+        description: task.description,
+        dueDate: task.dueDate,
+        status: task.status,
+        priority: task.priority,
+        assignee: task.assignee ?? "Unassigned",
+        assignedBy: task.assignedByName ?? "Unknown",
+        assignedAtIso: task.assignedAtIso ?? "",
+        hoursAssigned: task.hoursAssigned,
+        blockerReason: task.blockerReason,
+        dependencyTaskIds: task.dependencyTaskIds,
+        timeSpent: task.timeSpent,
+      }))
+      .slice(0, 120);
+
+    const myWorkPreferencesContext = myWorkPreferences
+      .filter((preference) => {
+        if (scopeMember === "All") {
+          return true;
+        }
+        return normalizeName(preference.userName) === normalizeName(scopeMember);
+      })
+      .slice(0, 80);
 
     return {
       scope: {
@@ -1333,6 +1850,12 @@ export default function AdminPage() {
       topOverdue,
       topPriorityOpen,
       blockedOpen,
+      projectsDetailed,
+      tasksDetailed: tasksDetailed.slice(0, 300),
+      teamLoad,
+      commitsRecent,
+      directTasks: directTasksContext,
+      myWorkPreferences: myWorkPreferencesContext,
     };
   };
 
@@ -1457,7 +1980,7 @@ export default function AdminPage() {
     setIsGeneratingSummary(true);
 
     const question =
-      "Generate a concise portfolio summary under 50 words total, covering both Marketing and Development. Include one key risk and one immediate focus.";
+      "Generate a concise evidence-backed portfolio summary in 60 to 90 words, covering both Marketing and Development, with one key risk and one immediate focus.";
     const context = buildScopedAiSnapshot({
       member: "All",
       projectKey: "All",
@@ -1490,13 +2013,20 @@ export default function AdminPage() {
         throw new Error(apiError);
       }
 
-      summaryText = truncateToWordCount(payload.answer, 50);
+      summaryText = ensureSummaryWordRange(
+        payload.answer,
+        context,
+        SUMMARY_MIN_WORDS,
+        SUMMARY_MAX_WORDS
+      );
     } catch (error) {
       const marketing = dashboard.workstreamSummary.Marketing;
       const development = dashboard.workstreamSummary.Development;
-      summaryText = truncateToWordCount(
-        `Marketing: ${marketing.open} open, ${marketing.overdue} overdue. Development: ${development.open} open, ${development.overdue} overdue. Immediate focus: close overdue backlog and unblock ${dashboard.blockedTasks} blocked tasks.`,
-        50
+      summaryText = ensureSummaryWordRange(
+        `Marketing currently has ${marketing.open} open tasks and ${marketing.overdue} overdue tasks, while Development has ${development.open} open tasks and ${development.overdue} overdue tasks. Immediate operational focus is to clear overdue backlog and resolve ${dashboard.blockedTasks} blocked or dependency-constrained tasks based on explicit workflow signals.`,
+        context,
+        SUMMARY_MIN_WORDS,
+        SUMMARY_MAX_WORDS
       );
       const message =
         error instanceof Error && error.message
@@ -1508,10 +2038,7 @@ export default function AdminPage() {
       const generatedAtIso = new Date().toISOString();
       const id = `summary-${aiMessageCounterRef.current}`;
       aiMessageCounterRef.current += 1;
-      setGeneratedSummaries((previous) => [
-        { id, generatedAtIso, text: summaryText },
-        ...previous,
-      ]);
+      setGeneratedSummary({ id, generatedAtIso, text: summaryText });
     }
   };
 
@@ -1631,24 +2158,20 @@ export default function AdminPage() {
           </p>
         )}
 
-        {generatedSummaries.length === 0 ? (
+        {generatedSummary === null ? (
           <p className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-2 text-sm text-slate-600">
             No summary generated yet.
           </p>
         ) : (
-          <div className="max-h-44 space-y-2 overflow-auto pr-1">
-            {generatedSummaries.map((entry) => (
-              <article
-                key={entry.id}
-                className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2"
-              >
-                <p className="text-xs font-medium text-slate-600">
-                  {formatDateTimeWithIndiaLocale(entry.generatedAtIso)}
-                </p>
-                <p className="mt-1 text-sm text-slate-800">{entry.text}</p>
-              </article>
-            ))}
-          </div>
+          <article
+            key={generatedSummary.id}
+            className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2"
+          >
+            <p className="text-xs font-medium text-slate-600">
+              {formatDateTimeWithIndiaLocale(generatedSummary.generatedAtIso)}
+            </p>
+            <p className="mt-1 text-sm text-slate-800">{generatedSummary.text}</p>
+          </article>
         )}
       </section>
 
