@@ -361,10 +361,11 @@ async function getSessionUser() {
   return verifySessionToken(token);
 }
 
-function buildSystemPrompt(): string {
+function buildSystemPrompt(intent: QueryIntent): string {
   return [
     "You are an internal project and delivery analyst.",
     "Use ONLY the provided context. Never invent or assume missing details.",
+    buildIntentGuidance(intent),
     "",
     "Hard constraints:",
     "1) No hallucinations. If evidence is missing, say \"Not enough evidence\".",
@@ -373,46 +374,12 @@ function buildSystemPrompt(): string {
     "4) Keep language clear and executive-friendly.",
     "5) If a section has no evidence, return exactly: \"No evidence-backed points.\"",
     "",
-    "Required output format and order:",
-    "## Scope",
-    "- Team member scope: ...",
-    "- Project scope: ...",
-    "- Projects analyzed: ...",
-    "- Tasks analyzed: ...",
-    "",
-    "## Executive Summary",
-    "- For each project in scope (max 8): start bullet with project name and describe current work in fluent English using task titles/descriptions.",
-    "- Do not include projects with no tasks unless explicitly relevant.",
-    "- Open tasks, overdue tasks, high-priority open, blocked/dependency open.",
-    "- Include overdue age where available (e.g., \"overdue by 3 days\").",
-    "- Overall trend: stable / improving / degrading, and WHY using only counts and commit/change signals in context.",
-    "",
-    "## Critical Risks",
-    "- Include ONLY evidence-backed risks.",
-    "- Allowed evidence: overdue age, explicit blockerReason text, unresolved dependencies count, high priority + overdue, high load from allocated vs assigned.",
-    "- Format: Task or Project | Evidence | Operational impact.",
-    "- Do NOT add hypothetical \"likely consequence\" lines.",
-    "",
-    "## Bottlenecks",
-    "- Use status counts and age/overdue distribution.",
-    "- Mention largest queue only if it creates measurable delay risk.",
-    "- If queue counts are low and healthy, say so briefly.",
-    "",
-    "## Team Signals",
-    "- Use teamLoad evidence (allocatedHours vs assignedHours, overdueOpenTasks, highPriorityOpenTasks).",
-    "- Mention concentration or overload ONLY when metrics support it.",
-    "- If allocatedHours is missing/zero, avoid burnout claims.",
-    "",
-    "## Immediate Actions (Next 7 Days)",
-    "- Provide 0 to 5 actions.",
-    "- Include only evidence-backed actions tied to concrete tasks/projects.",
-    "- No generic management advice.",
-    "- Format: 1) Action | Owner suggestion | Why now (evidence).",
-    "",
-    "## Priority Task Watchlist",
-    "- Include only tasks with strong evidence (overdue, blocked, unresolved dependencies, high priority near due date).",
-    "- Up to 8 tasks; if none, return \"No evidence-backed points.\"",
-    "- Format: Title | Project | Assignee | Status | Priority | Due date | Evidence.",
+    "Formatting policy:",
+    "- Do NOT force a fixed template for every question.",
+    "- Start with a direct plain-English answer (2-5 lines).",
+    "- Then add short bullet points only if useful.",
+    "- For specific intents (overdue/week/today/blockers), follow intent guidance strictly.",
+    "- If asked for summary, keep it concise and readable.",
     "",
     "Style constraints:",
     "- Professional, direct, non-hype tone.",
@@ -422,16 +389,21 @@ function buildSystemPrompt(): string {
   ].join("\n");
 }
 
-function buildUserPrompt(question: string, context: AiScopeSnapshot): string {
+function buildUserPrompt(
+  question: string,
+  context: AiScopeSnapshot,
+  intent: QueryIntent
+): string {
   const contextJson = JSON.stringify(context, null, 2);
   return [
+    `Detected intent: ${intent}`,
     "Question from user:",
     question,
     "",
     "Context JSON:",
     contextJson,
     "",
-    "Now generate the analysis using the required output format.",
+    "Answer in simple English and follow intent guidance.",
   ].join("\n");
 }
 
@@ -470,24 +442,6 @@ function normalizeText(value: string): string {
   return value.trim().toLowerCase();
 }
 
-function getDateMs(value: string): number | null {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    return null;
-  }
-  const date = new Date(`${value}T00:00:00`);
-  const ms = date.getTime();
-  return Number.isNaN(ms) ? null : ms;
-}
-
-function getDaysFromToday(dueDate: string, todayIso: string): number | null {
-  const dueMs = getDateMs(dueDate);
-  const todayMs = getDateMs(todayIso);
-  if (dueMs === null || todayMs === null) {
-    return null;
-  }
-  return Math.round((dueMs - todayMs) / (24 * 60 * 60 * 1000));
-}
-
 function detectQueryIntent(question: string): QueryIntent {
   const q = normalizeText(question);
   if (
@@ -521,302 +475,51 @@ function detectQueryIntent(question: string): QueryIntent {
   return "general";
 }
 
-function isDueDateRelatedField(field: string): boolean {
-  const normalizedField = normalizeText(field);
-  return normalizedField.includes("due") || normalizedField.includes("deadline");
-}
-
-function getTaskDueDateCommits(
-  task: AiContextTaskRow,
-  context: AiScopeSnapshot
-): AiCommitRow[] {
-  const normalizedTaskTitle = normalizeText(task.title);
-  return context.commitsRecent
-    .filter((commit) => {
-      if (commit.stream !== task.stream) {
-        return false;
-      }
-      if (!isDueDateRelatedField(commit.field)) {
-        return false;
-      }
-      if (normalizeText(commit.projectName) !== normalizeText(task.projectName)) {
-        return false;
-      }
-      if (commit.scope === "project") {
-        return true;
-      }
-      if (commit.taskId && commit.taskId === task.id) {
-        return true;
-      }
-      if (commit.taskTitle && normalizeText(commit.taskTitle) === normalizedTaskTitle) {
-        return true;
-      }
-      return false;
-    })
-    .sort((a, b) => Date.parse(b.changedAtIso) - Date.parse(a.changedAtIso));
-}
-
-function formatCommitLine(commit: AiCommitRow): string {
-  const timeLabel = commit.changedAtIndia || commit.changedAtIso || "Unknown time";
-  return `${timeLabel}: ${commit.field} ${commit.fromValue} -> ${commit.toValue} by ${commit.changedBy}`;
-}
-
-function toCompactSentence(value: string, fallback: string): string {
-  const clean = value.replace(/\s+/g, " ").trim();
-  if (!clean) {
-    return fallback;
-  }
-  return clean;
-}
-
-function buildOverdueDeepDiveReport(
-  question: string,
-  context: AiScopeSnapshot
-): string {
-  const overdueTasks = context.tasksDetailed
-    .filter((task) => task.status !== "Done" && task.daysOverdue > 0)
-    .sort((a, b) => {
-      if (b.daysOverdue !== a.daysOverdue) {
-        return b.daysOverdue - a.daysOverdue;
-      }
-      const priorityA = a.priority === "High" ? 0 : a.priority === "Medium" ? 1 : 2;
-      const priorityB = b.priority === "High" ? 0 : b.priority === "Medium" ? 1 : 2;
-      if (priorityA !== priorityB) {
-        return priorityA - priorityB;
-      }
-      return a.title.localeCompare(b.title);
-    });
-
-  const lines: string[] = [
-    "## Overdue Tasks",
-    `- Scope: ${context.scope.member} | ${context.scope.project}`,
-    `- Question: ${question}`,
-    `- Total overdue tasks: ${overdueTasks.length}`,
-  ];
-
-  if (overdueTasks.length === 0) {
-    lines.push("- None right now.");
-    return lines.join("\n");
+function buildIntentGuidance(intent: QueryIntent): string {
+  if (intent === "overdue_deep_dive") {
+    return [
+      "Intent: overdue tasks deep dive.",
+      "Answer only for overdue open tasks in scope.",
+      "For each relevant task include: overdue days, blocker reason (or 'None right now'), unresolved dependencies, and due-date/deadline commit evidence if available.",
+      "Explain in plain English, concise and useful.",
+      "If no overdue tasks exist, return exactly: None right now.",
+    ].join("\n");
   }
 
-  overdueTasks.slice(0, 20).forEach((task, index) => {
-    const dueDateCommits = getTaskDueDateCommits(task, context).slice(0, 3);
-    const dependencyText =
-      task.unresolvedDependencies > 0
-        ? `${task.unresolvedDependencies} unresolved (${task.dependencyTaskIds.join(", ") || "ids unavailable"})`
-        : "None right now";
-    const blockerText = toCompactSentence(task.blockerReason, "None right now");
-    const noteText = toCompactSentence(task.description, "None right now");
-    const commitText =
-      dueDateCommits.length > 0
-        ? dueDateCommits.map((commit) => formatCommitLine(commit)).join(" | ")
-        : "None right now";
-
-    lines.push("");
-    lines.push(
-      `${index + 1}) ${task.title} | ${task.projectName} | ${task.assignee} | ${task.status} | ${task.priority}`
-    );
-    lines.push(`- Overdue by: ${task.daysOverdue} day${task.daysOverdue === 1 ? "" : "s"}`);
-    lines.push(`- Blocker reason: ${blockerText}`);
-    lines.push(`- Dependency delay: ${dependencyText}`);
-    lines.push(`- Task note (description): ${noteText}`);
-    lines.push(`- Due-date/deadline commits: ${commitText}`);
-  });
-
-  return lines.join("\n");
-}
-
-function buildTodayTasksReport(
-  question: string,
-  context: AiScopeSnapshot
-): string {
-  const todayTasks = context.tasksDetailed
-    .filter((task) => task.status !== "Done" && task.dueDate === context.todayIso)
-    .sort((a, b) => {
-      const priorityA = a.priority === "High" ? 0 : a.priority === "Medium" ? 1 : 2;
-      const priorityB = b.priority === "High" ? 0 : b.priority === "Medium" ? 1 : 2;
-      if (priorityA !== priorityB) {
-        return priorityA - priorityB;
-      }
-      return a.title.localeCompare(b.title);
-    });
-
-  const lines: string[] = [
-    "## Today's Tasks",
-    `- Scope: ${context.scope.member} | ${context.scope.project}`,
-    `- Question: ${question}`,
-    `- Date: ${context.todayIso}`,
-    `- Tasks due today: ${todayTasks.length}`,
-  ];
-
-  if (todayTasks.length === 0) {
-    lines.push("- None right now.");
-    return lines.join("\n");
+  if (intent === "weekly_plan") {
+    return [
+      "Intent: this week plan.",
+      "Build a simple execution plan for next 7 days from context.todayIso.",
+      "Prioritize overdue first, then due soon, then blocked/dependency work that needs unblocking.",
+      "Use plain English and practical sequencing.",
+      "If no relevant tasks exist, return exactly: None right now.",
+    ].join("\n");
   }
 
-  todayTasks.slice(0, 20).forEach((task, index) => {
-    const blockerText = toCompactSentence(task.blockerReason, "None right now");
-    const dependencyText =
-      task.unresolvedDependencies > 0
-        ? `${task.unresolvedDependencies} unresolved (${task.dependencyTaskIds.join(", ") || "ids unavailable"})`
-        : "None right now";
-    const noteText = toCompactSentence(task.description, "None right now");
-
-    lines.push("");
-    lines.push(
-      `${index + 1}) ${task.title} | ${task.projectName} | ${task.assignee} | ${task.status} | ${task.priority}`
-    );
-    lines.push(`- Blocker reason: ${blockerText}`);
-    lines.push(`- Dependency delay: ${dependencyText}`);
-    lines.push(`- Task note (description): ${noteText}`);
-  });
-
-  return lines.join("\n");
-}
-
-function buildWeeklyPlanReport(
-  question: string,
-  context: AiScopeSnapshot
-): string {
-  const weeklyTasks = context.tasksDetailed
-    .filter((task) => task.status !== "Done")
-    .filter((task) => {
-      const daysFromToday = getDaysFromToday(task.dueDate, context.todayIso);
-      if (daysFromToday === null) {
-        return false;
-      }
-      return daysFromToday <= 6;
-    })
-    .sort((a, b) => {
-      const aDays = getDaysFromToday(a.dueDate, context.todayIso) ?? 9999;
-      const bDays = getDaysFromToday(b.dueDate, context.todayIso) ?? 9999;
-      if (aDays !== bDays) {
-        return aDays - bDays;
-      }
-      const priorityA = a.priority === "High" ? 0 : a.priority === "Medium" ? 1 : 2;
-      const priorityB = b.priority === "High" ? 0 : b.priority === "Medium" ? 1 : 2;
-      if (priorityA !== priorityB) {
-        return priorityA - priorityB;
-      }
-      return a.title.localeCompare(b.title);
-    });
-
-  const overdueCarryover = weeklyTasks.filter((task) => task.daysOverdue > 0).length;
-  const dueThisWeek = weeklyTasks.filter((task) => task.daysOverdue === 0).length;
-  const lines: string[] = [
-    "## This Week Plan",
-    `- Scope: ${context.scope.member} | ${context.scope.project}`,
-    `- Question: ${question}`,
-    `- Plan window: ${context.todayIso} to +6 days`,
-    `- Overdue carryover tasks: ${overdueCarryover}`,
-    `- Due within this week: ${dueThisWeek}`,
-  ];
-
-  if (weeklyTasks.length === 0) {
-    lines.push("- None right now.");
-    return lines.join("\n");
+  if (intent === "today_tasks") {
+    return [
+      "Intent: today's tasks.",
+      "Answer only tasks due today (and urgent overdue carryover if explicitly needed by question).",
+      "Use plain English, short actionable bullets.",
+      "If none exist, return exactly: None right now.",
+    ].join("\n");
   }
 
-  lines.push("");
-  lines.push("### Execution Order");
-  weeklyTasks.slice(0, 20).forEach((task, index) => {
-    const daysFromToday = getDaysFromToday(task.dueDate, context.todayIso);
-    const timingText =
-      daysFromToday === null
-        ? "no due-date evidence"
-        : daysFromToday < 0
-          ? `overdue by ${Math.abs(daysFromToday)} day${Math.abs(daysFromToday) === 1 ? "" : "s"}`
-          : daysFromToday === 0
-            ? "due today"
-            : `due in ${daysFromToday} day${daysFromToday === 1 ? "" : "s"}`;
-    const blockerText = toCompactSentence(task.blockerReason, "None right now");
-    const dependencyText =
-      task.unresolvedDependencies > 0
-        ? `${task.unresolvedDependencies} unresolved (${task.dependencyTaskIds.join(", ") || "ids unavailable"})`
-        : "None right now";
-
-    lines.push(
-      `${index + 1}) ${task.title} | ${task.projectName} | ${task.assignee} | ${task.status} | ${task.priority} | ${timingText}`
-    );
-    lines.push(`- Why now: ${timingText}; assigned ${task.hoursAssigned}h; spent ${task.timeSpent}h.`);
-    lines.push(`- Blocker reason: ${blockerText}`);
-    lines.push(`- Dependency delay: ${dependencyText}`);
-  });
-
-  const matchingPreference =
-    context.scope.member === "All team members"
-      ? null
-      : context.myWorkPreferences.find(
-          (preference) =>
-            normalizeText(preference.userName) === normalizeText(context.scope.member)
-        ) ?? null;
-
-  lines.push("");
-  lines.push("### Personal Queue Signals");
-  if (!matchingPreference) {
-    lines.push("- None right now.");
-  } else {
-    const openTodos = matchingPreference.customTodos.filter((todo) => !todo.done);
-    const openTodoHours = openTodos.reduce((sum, todo) => sum + todo.hours, 0);
-    lines.push(
-      `- Focus list tasks: ${matchingPreference.focusedTaskKeys.length}`
-    );
-    lines.push(
-      `- Personal todos open: ${openTodos.length} (${openTodoHours}h planned)`
-    );
+  if (intent === "blocked_dependencies") {
+    return [
+      "Intent: blockers and dependencies.",
+      "Focus on explicit blockerReason and unresolvedDependencies evidence.",
+      "State what is blocked, by what evidence, and what needs to move first.",
+      "If none exist, return exactly: None right now.",
+    ].join("\n");
   }
 
-  return lines.join("\n");
-}
-
-function buildBlockedDependencyReport(
-  question: string,
-  context: AiScopeSnapshot
-): string {
-  const blockedTasks = context.tasksDetailed
-    .filter(
-      (task) =>
-        task.status !== "Done" &&
-        (task.blockerReason.trim().length > 0 || task.unresolvedDependencies > 0)
-    )
-    .sort((a, b) => {
-      if (b.unresolvedDependencies !== a.unresolvedDependencies) {
-        return b.unresolvedDependencies - a.unresolvedDependencies;
-      }
-      if (b.daysOverdue !== a.daysOverdue) {
-        return b.daysOverdue - a.daysOverdue;
-      }
-      return a.title.localeCompare(b.title);
-    });
-
-  const lines: string[] = [
-    "## Blockers And Dependencies",
-    `- Scope: ${context.scope.member} | ${context.scope.project}`,
-    `- Question: ${question}`,
-    `- Blocked/dependency tasks: ${blockedTasks.length}`,
-  ];
-
-  if (blockedTasks.length === 0) {
-    lines.push("- None right now.");
-    return lines.join("\n");
-  }
-
-  blockedTasks.slice(0, 20).forEach((task, index) => {
-    const blockerText = toCompactSentence(task.blockerReason, "None right now");
-    const dependencyText =
-      task.unresolvedDependencies > 0
-        ? `${task.unresolvedDependencies} unresolved (${task.dependencyTaskIds.join(", ") || "ids unavailable"})`
-        : "None right now";
-    lines.push("");
-    lines.push(
-      `${index + 1}) ${task.title} | ${task.projectName} | ${task.assignee} | ${task.status} | ${task.priority}`
-    );
-    lines.push(`- Blocker reason: ${blockerText}`);
-    lines.push(`- Dependency delay: ${dependencyText}`);
-    lines.push(`- Overdue: ${task.daysOverdue > 0 ? `${task.daysOverdue} day(s)` : "None right now"}`);
-  });
-
-  return lines.join("\n");
+  return [
+    "Intent: general analysis.",
+    "Answer the user question directly in simple English.",
+    "Use structure only when it improves clarity.",
+    "Avoid dumping raw data; synthesize key points from evidence.",
+  ].join("\n");
 }
 
 function extractAssistantText(payload: unknown): string {
@@ -861,7 +564,8 @@ function extractAssistantText(payload: unknown): string {
 async function requestOpenAiAnswer(
   question: string,
   context: AiScopeSnapshot,
-  mode: RequestMode
+  mode: RequestMode,
+  intent: QueryIntent
 ): Promise<string> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
@@ -884,14 +588,14 @@ async function requestOpenAiAnswer(
           content:
             mode === "compact_summary"
               ? buildCompactSummarySystemPrompt()
-              : buildSystemPrompt(),
+              : buildSystemPrompt(intent),
         },
         {
           role: "user",
           content:
             mode === "compact_summary"
               ? buildCompactSummaryUserPrompt(question, context)
-              : buildUserPrompt(question, context),
+              : buildUserPrompt(question, context, intent),
         },
       ],
     }),
@@ -943,31 +647,9 @@ export async function POST(request: Request) {
 
   try {
     const mode = normalizeRequestMode(body.mode);
-    if (mode === "structured_analysis") {
-      const intent = detectQueryIntent(question);
-      if (intent === "overdue_deep_dive") {
-        return NextResponse.json({
-          answer: buildOverdueDeepDiveReport(question, body.context),
-        });
-      }
-      if (intent === "weekly_plan") {
-        return NextResponse.json({
-          answer: buildWeeklyPlanReport(question, body.context),
-        });
-      }
-      if (intent === "today_tasks") {
-        return NextResponse.json({
-          answer: buildTodayTasksReport(question, body.context),
-        });
-      }
-      if (intent === "blocked_dependencies") {
-        return NextResponse.json({
-          answer: buildBlockedDependencyReport(question, body.context),
-        });
-      }
-    }
-
-    const answer = await requestOpenAiAnswer(question, body.context, mode);
+    const intent: QueryIntent =
+      mode === "structured_analysis" ? detectQueryIntent(question) : "general";
+    const answer = await requestOpenAiAnswer(question, body.context, mode, intent);
     return NextResponse.json({ answer });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unexpected AI service error.";

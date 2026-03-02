@@ -1867,59 +1867,6 @@ export default function AdminPage() {
     };
   };
 
-  const buildAiAnalysisReply = (question: string): string => {
-    const snapshot = buildScopedAiSnapshot();
-    const actionLines: string[] = [];
-    if (snapshot.summary.overdue > 0) {
-      actionLines.push(
-        `1) Close overdue first: ${snapshot.topOverdue
-          .slice(0, 3)
-          .map((task) => task.title)
-          .join(", ")}.`
-      );
-    }
-    if (snapshot.summary.blockedOpen > 0) {
-      actionLines.push(`2) Resolve blockers/dependencies on ${snapshot.summary.blockedOpen} open tasks.`);
-    }
-    if (snapshot.summary.highPriorityOpen > 0 && snapshot.summary.dueToday === 0) {
-      actionLines.push("3) Pull high-priority open tasks into active execution now.");
-    }
-    if (
-      snapshot.statusCounts["In Progress"] > 0 ||
-      snapshot.statusCounts.Review > 0
-    ) {
-      actionLines.push("4) Push In Progress/Review queue to Done to improve flow.");
-    }
-    if (actionLines.length === 0) {
-      actionLines.push("1) No critical risk detected in this scope. Keep current execution rhythm.");
-    }
-
-    const hotTaskLines =
-      snapshot.topPriorityOpen.length === 0
-        ? ["- No open tasks in this scope."]
-        : snapshot.topPriorityOpen.slice(0, 5).map((task) => {
-            const dateText = task.dueDate ? formatIsoDate(task.dueDate) : "No due date";
-            return `- ${task.title} | ${task.projectName} | ${task.status} | ${task.priority} | ${dateText}`;
-          });
-
-    return [
-      `Scope: ${snapshot.scope.member} | ${snapshot.scope.project}`,
-      `Question: ${question}`,
-      "",
-      "Snapshot",
-      `- Projects in scope: ${snapshot.summary.projects}`,
-      `- Tasks in scope: ${snapshot.summary.tasks} (${snapshot.summary.open} open, ${snapshot.summary.done} done)`,
-      `- Overdue: ${snapshot.summary.overdue} | Due today: ${snapshot.summary.dueToday} | Due this week: ${snapshot.summary.dueThisWeek}`,
-      `- High priority open: ${snapshot.summary.highPriorityOpen} | Blocked/dependency: ${snapshot.summary.blockedOpen}`,
-      "",
-      "Suggested next actions",
-      ...actionLines,
-      "",
-      "Top tasks to review",
-      ...hotTaskLines,
-    ].join("\n");
-  };
-
   const sendAiPrompt = async (questionOverride?: string) => {
     const question = (questionOverride ?? aiInput).trim();
     if (!question || isAiSending) {
@@ -1964,11 +1911,12 @@ export default function AdminPage() {
 
       reply = payload.answer.trim();
     } catch (error) {
-      reply = buildAiAnalysisReply(question);
       const message =
         error instanceof Error && error.message
           ? error.message
           : "AI service unavailable.";
+      reply =
+        "AI service is unavailable right now. Please verify OPENAI_API_KEY and try again.";
       setAiServiceError(message);
     } finally {
       setIsAiSending(false);
@@ -1994,6 +1942,7 @@ export default function AdminPage() {
       projectKey: "All",
     });
     let summaryText = "";
+    let summaryGenerated = false;
 
     try {
       const response = await fetch("/api/admin/ai-analysis", {
@@ -2027,15 +1976,8 @@ export default function AdminPage() {
         SUMMARY_MIN_WORDS,
         SUMMARY_MAX_WORDS
       );
+      summaryGenerated = true;
     } catch (error) {
-      const marketing = dashboard.workstreamSummary.Marketing;
-      const development = dashboard.workstreamSummary.Development;
-      summaryText = ensureSummaryWordRange(
-        `Marketing currently has ${marketing.open} open tasks and ${marketing.overdue} overdue tasks, while Development has ${development.open} open tasks and ${development.overdue} overdue tasks. Immediate operational focus is to clear overdue backlog and resolve ${dashboard.blockedTasks} blocked or dependency-constrained tasks based on explicit workflow signals.`,
-        context,
-        SUMMARY_MIN_WORDS,
-        SUMMARY_MAX_WORDS
-      );
       const message =
         error instanceof Error && error.message
           ? error.message
@@ -2043,6 +1985,9 @@ export default function AdminPage() {
       setGeneratedSummaryError(message);
     } finally {
       setIsGeneratingSummary(false);
+    }
+
+    if (summaryGenerated) {
       const generatedAtIso = new Date().toISOString();
       const id = `summary-${aiMessageCounterRef.current}`;
       aiMessageCounterRef.current += 1;
@@ -2708,7 +2653,7 @@ export default function AdminPage() {
                 <div className="rounded-xl border border-slate-300 bg-white p-3">
                   {aiServiceError && (
                     <p className="mb-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-700">
-                      OpenAI service unavailable. Showing built-in analysis instead. {aiServiceError}
+                      OpenAI service unavailable. {aiServiceError}
                     </p>
                   )}
                   <div className="mb-2 flex flex-wrap gap-2">
