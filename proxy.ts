@@ -3,6 +3,7 @@ import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/auth/session";
 
 const PROTECTED_PREFIXES = [
   "/my-work",
+  "/team",
   "/marketing",
   "/development",
   "/admin",
@@ -45,10 +46,10 @@ export const config = {
   matcher: [
     "/login",
     "/my-work/:path*",
+    "/team/:path*",
     "/marketing/:path*",
     "/development/:path*",
     "/admin/:path*",
     "/profile/:path*",
   ],
 };
-

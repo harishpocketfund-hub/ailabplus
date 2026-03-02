@@ -8,6 +8,7 @@ import {
   Megaphone,
   PanelLeft,
   Shield,
+  Users,
 } from "lucide-react";
 import { useEffect, useRef, useSyncExternalStore } from "react";
 import { usePathname, useRouter } from "next/navigation";
@@ -55,6 +56,7 @@ const subscribeToSidebarCollapsed = (
 
 const sidebarLinks = [
   { href: "/my-work", label: "My Work", icon: LayoutDashboard },
+  { href: "/team", label: "Team", icon: Users },
   { href: "/marketing", label: "Marketing", icon: Megaphone },
   { href: "/development", label: "Development", icon: Code2 },
   { href: "/admin", label: "Admin", icon: Shield },
