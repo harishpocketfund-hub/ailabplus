@@ -71,9 +71,16 @@ import {
   subscribeToDevelopmentProjects,
 } from "@/lib/development-projects";
 import {
+  getDevelopmentMembersServerSnapshot,
+  getDevelopmentMembersSnapshot,
+  parseDevelopmentMembersByProject,
+  subscribeToDevelopmentMembers,
+} from "@/lib/development-members";
+import {
   getDevelopmentTasksServerSnapshot,
   getDevelopmentTasksSnapshot,
   parseDevelopmentTasksByProject,
+  writeDevelopmentTasksForProject,
   subscribeToDevelopmentTasks,
 } from "@/lib/development-tasks";
 import { fetchUserPreference, saveUserPreference } from "@/lib/preferences-client";
@@ -143,6 +150,7 @@ type MyWorkPreferencesByUser = Record<string, MyWorkUserPreferences>;
 type TaskEntry = {
   key: string;
   source: "project" | "direct";
+  workstream: "marketing" | "development" | "direct";
   projectId: string;
   projectName: string;
   projectHref: string | null;
@@ -161,6 +169,7 @@ type FocusBucket = 0 | 1 | 2 | 3 | 4 | 5 | 99;
 type DeleteTarget = {
   projectId: string;
   taskId: string;
+  workstream: TaskKeyWorkstream;
 } | null;
 
 type MyWorkSummaryStream = "Marketing" | "Development";
@@ -174,6 +183,8 @@ type SummaryAssignedTask = {
 };
 
 type AssignedByMeEntry = TaskEntry;
+
+type TaskKeyWorkstream = "marketing" | "development" | "direct";
 
 const createDefaultFilters = (): MyWorkFilters => ({
   search: "",
@@ -452,8 +463,11 @@ const getWeekDatesForReference = (referenceDateMs: number): WeekDateEntry[] => {
   });
 };
 
-const getTaskKey = (projectId: string, taskId: string): string =>
-  `${projectId}::${taskId}`;
+const getTaskKey = (
+  workstream: TaskKeyWorkstream,
+  projectId: string,
+  taskId: string
+): string => `${workstream}::${projectId}::${taskId}`;
 
 const getCustomTodoKey = (todoId: string): string => `custom::${todoId}`;
 
@@ -467,16 +481,38 @@ const createMyWorkCustomTodoId = (): string => {
 
 const parseTaskKey = (
   taskKey: string
-): { projectId: string; taskId: string } | null => {
-  const separatorIndex = taskKey.indexOf("::");
-  if (separatorIndex === -1) {
-    return null;
+): { workstream: TaskKeyWorkstream; projectId: string; taskId: string } | null => {
+  const parts = taskKey.split("::");
+  if (parts.length === 3) {
+    const [workstream, projectId, taskId] = parts;
+    if (
+      (workstream === "marketing" ||
+        workstream === "development" ||
+        workstream === "direct") &&
+      projectId &&
+      taskId
+    ) {
+      return {
+        workstream,
+        projectId,
+        taskId,
+      };
+    }
   }
 
-  return {
-    projectId: taskKey.slice(0, separatorIndex),
-    taskId: taskKey.slice(separatorIndex + 2),
-  };
+  if (parts.length === 2) {
+    const [legacyProjectId, legacyTaskId] = parts;
+    if (legacyProjectId && legacyTaskId) {
+      return {
+        workstream:
+          legacyProjectId === DIRECT_TASK_PROJECT_ID ? "direct" : "marketing",
+        projectId: legacyProjectId,
+        taskId: legacyTaskId,
+      };
+    }
+  }
+
+  return null;
 };
 
 const getPriorityBadgeClasses = (priority: MarketingTaskPriority): string => {
@@ -723,6 +759,11 @@ export default function MyWorkPage() {
     getDevelopmentProjectsSnapshot,
     getDevelopmentProjectsServerSnapshot
   );
+  const rawDevelopmentMembersByProject = useSyncExternalStore(
+    subscribeToDevelopmentMembers,
+    getDevelopmentMembersSnapshot,
+    getDevelopmentMembersServerSnapshot
+  );
   const rawDevelopmentTasksByProject = useSyncExternalStore(
     subscribeToDevelopmentTasks,
     getDevelopmentTasksSnapshot,
@@ -735,6 +776,9 @@ export default function MyWorkPage() {
   const tasksByProject = parseMarketingTasksByProject(rawTasksByProject);
   const membersByProject = parseMarketingMembersByProject(rawMembersByProject);
   const developmentProjects = parseDevelopmentProjects(rawDevelopmentProjects);
+  const developmentMembersByProject = parseDevelopmentMembersByProject(
+    rawDevelopmentMembersByProject
+  );
   const developmentTasksByProject = parseDevelopmentTasksByProject(
     rawDevelopmentTasksByProject
   );
@@ -855,8 +899,9 @@ export default function MyWorkPage() {
         }
 
         entries.push({
-          key: getTaskKey(projectId, task.id),
+          key: getTaskKey("marketing", projectId, task.id),
           source: "project",
+          workstream: "marketing",
           projectId,
           projectName: project.name,
           projectHref: `/marketing/projects/${projectId}`,
@@ -874,8 +919,9 @@ export default function MyWorkPage() {
 
       const assignedBy = task.assignedByName ?? "Unknown";
       entries.push({
-        key: getTaskKey(DIRECT_TASK_PROJECT_ID, task.id),
+        key: getTaskKey("direct", DIRECT_TASK_PROJECT_ID, task.id),
         source: "direct",
+        workstream: "direct",
         projectId: DIRECT_TASK_PROJECT_ID,
         projectName: `Direct assignment by ${assignedBy}`,
         projectHref: null,
@@ -1000,11 +1046,16 @@ export default function MyWorkPage() {
       return [] as AssignedByMeEntry[];
     }
 
-    const projectById = new Map(projects.map((project) => [project.id, project]));
+    const marketingProjectById = new Map(
+      projects.map((project) => [project.id, project])
+    );
+    const developmentProjectById = new Map(
+      developmentProjects.map((project) => [project.id, project])
+    );
     const entries: AssignedByMeEntry[] = [];
 
     Object.entries(tasksByProject).forEach(([projectId, projectTasks]) => {
-      const project = projectById.get(projectId);
+      const project = marketingProjectById.get(projectId);
       if (!project) {
         return;
       }
@@ -1019,13 +1070,43 @@ export default function MyWorkPage() {
         }
 
         entries.push({
-          key: getTaskKey(projectId, task.id),
+          key: getTaskKey("marketing", projectId, task.id),
           source: "project",
+          workstream: "marketing",
           projectId,
           projectName: project.name,
           projectHref: `/marketing/projects/${projectId}`,
           contextLabel: project.name,
           members: membersByProject[projectId] ?? [],
+          task,
+        });
+      });
+    });
+
+    Object.entries(developmentTasksByProject).forEach(([projectId, projectTasks]) => {
+      const project = developmentProjectById.get(projectId);
+      if (!project) {
+        return;
+      }
+
+      projectTasks.forEach((task) => {
+        if (
+          (task.assignedByName ?? "").trim().toLowerCase() !== normalizedUserName ||
+          !task.assignee ||
+          task.status === "Done"
+        ) {
+          return;
+        }
+
+        entries.push({
+          key: getTaskKey("development", projectId, task.id),
+          source: "project",
+          workstream: "development",
+          projectId,
+          projectName: project.name,
+          projectHref: `/development/projects/${projectId}`,
+          contextLabel: project.name,
+          members: developmentMembersByProject[projectId] ?? [],
           task,
         });
       });
@@ -1041,8 +1122,9 @@ export default function MyWorkPage() {
       }
 
       entries.push({
-        key: getTaskKey(DIRECT_TASK_PROJECT_ID, task.id),
+        key: getTaskKey("direct", DIRECT_TASK_PROJECT_ID, task.id),
         source: "direct",
+        workstream: "direct",
         projectId: DIRECT_TASK_PROJECT_ID,
         projectName: "Individual",
         projectHref: null,
@@ -1058,7 +1140,17 @@ export default function MyWorkPage() {
       }
       return firstEntry.task.title.localeCompare(secondEntry.task.title);
     });
-  }, [directTaskMembers, directTasks, membersByProject, projects, tasksByProject, userName]);
+  }, [
+    developmentMembersByProject,
+    developmentProjects,
+    developmentTasksByProject,
+    directTaskMembers,
+    directTasks,
+    membersByProject,
+    projects,
+    tasksByProject,
+    userName,
+  ]);
 
   const filteredAssignedByMeEntries = useMemo(() => {
     const query = assignedByMeFilters.search.trim().toLowerCase();
@@ -1397,7 +1489,10 @@ export default function MyWorkPage() {
           return count;
         }, 0);
 
-        counts.set(getTaskKey(projectId, task.id), unresolvedDependencies);
+        counts.set(
+          getTaskKey("marketing", projectId, task.id),
+          unresolvedDependencies
+        );
       });
     });
 
@@ -1416,7 +1511,10 @@ export default function MyWorkPage() {
         0
       );
 
-      counts.set(getTaskKey(DIRECT_TASK_PROJECT_ID, task.id), unresolvedDependencies);
+      counts.set(
+        getTaskKey("direct", DIRECT_TASK_PROJECT_ID, task.id),
+        unresolvedDependencies
+      );
     });
 
     return counts;
@@ -1625,11 +1723,14 @@ export default function MyWorkPage() {
     if (!modalEntry) {
       return [] as MarketingTask[];
     }
-    if (modalEntry.projectId === DIRECT_TASK_PROJECT_ID) {
+    if (modalEntry.workstream === "direct") {
       return directTasks;
     }
+    if (modalEntry.workstream === "development") {
+      return developmentTasksByProject[modalEntry.projectId] ?? [];
+    }
     return tasksByProject[modalEntry.projectId] ?? [];
-  }, [directTasks, modalEntry, tasksByProject]);
+  }, [developmentTasksByProject, directTasks, modalEntry, tasksByProject]);
   const parsedModalTaskKey = modalTaskKey ? parseTaskKey(modalTaskKey) : null;
   const modalTaskId = parsedModalTaskKey?.taskId ?? null;
   const modalAssigneeOptions = useMemo(() => {
@@ -1932,9 +2033,10 @@ export default function MyWorkPage() {
 
   const updateProjectTasks = (
     projectId: string,
-    updater: (tasks: MarketingTask[]) => MarketingTask[]
+    updater: (tasks: MarketingTask[]) => MarketingTask[],
+    workstream: TaskKeyWorkstream = "marketing"
   ) => {
-    if (projectId === DIRECT_TASK_PROJECT_ID) {
+    if (workstream === "direct" || projectId === DIRECT_TASK_PROJECT_ID) {
       setDirectTasks((currentDirectTasks) => {
         const previousById = new Map(
           currentDirectTasks.map((task) => [task.id, task] as const)
@@ -1955,6 +2057,12 @@ export default function MyWorkPage() {
         persistDirectTasks(nextTasks);
         return nextTasks;
       });
+      return;
+    }
+
+    if (workstream === "development") {
+      const currentTasks = developmentTasksByProject[projectId] ?? [];
+      writeDevelopmentTasksForProject(projectId, updater(currentTasks));
       return;
     }
 
@@ -2103,8 +2211,12 @@ export default function MyWorkPage() {
     setDeleteTarget(null);
   }
 
-  const requestDeleteTask = (projectId: string, taskId: string) => {
-    setDeleteTarget({ projectId, taskId });
+  const requestDeleteTask = (
+    projectId: string,
+    taskId: string,
+    workstream: TaskKeyWorkstream
+  ) => {
+    setDeleteTarget({ projectId, taskId, workstream });
   };
 
   const confirmDeleteTask = () => {
@@ -2112,9 +2224,15 @@ export default function MyWorkPage() {
       return;
     }
 
-    const modalKey = getTaskKey(deleteTarget.projectId, deleteTarget.taskId);
-    updateProjectTasks(deleteTarget.projectId, (projectTasks) =>
-      projectTasks.filter((task) => task.id !== deleteTarget.taskId)
+    const modalKey = getTaskKey(
+      deleteTarget.workstream,
+      deleteTarget.projectId,
+      deleteTarget.taskId
+    );
+    updateProjectTasks(
+      deleteTarget.projectId,
+      (projectTasks) => projectTasks.filter((task) => task.id !== deleteTarget.taskId),
+      deleteTarget.workstream
     );
     setFocusedTaskKeys((currentKeys) =>
       currentKeys.filter((currentKey) => currentKey !== modalKey)
@@ -2131,20 +2249,24 @@ export default function MyWorkPage() {
     projectId: string,
     taskId: string,
     date: string,
-    isDone: boolean
+    isDone: boolean,
+    workstream: TaskKeyWorkstream
   ) => {
-    updateProjectTasks(projectId, (projectTasks) =>
-      projectTasks.map((task) =>
-        task.id === taskId
-          ? {
-              ...task,
-              recurringCompletions: {
-                ...task.recurringCompletions,
-                [date]: isDone,
-              },
-            }
-          : task
-      )
+    updateProjectTasks(
+      projectId,
+      (projectTasks) =>
+        projectTasks.map((task) =>
+          task.id === taskId
+            ? {
+                ...task,
+                recurringCompletions: {
+                  ...task.recurringCompletions,
+                  [date]: isDone,
+                },
+              }
+            : task
+        ),
+      workstream
     );
   };
 
@@ -2153,21 +2275,25 @@ export default function MyWorkPage() {
       return;
     }
 
-    updateProjectTasks(entry.projectId, (projectTasks) => {
-      const doneCount = projectTasks.filter(
-        (task) => task.status === "Done" && task.id !== entry.task.id
-      ).length;
+    updateProjectTasks(
+      entry.projectId,
+      (projectTasks) => {
+        const doneCount = projectTasks.filter(
+          (task) => task.status === "Done" && task.id !== entry.task.id
+        ).length;
 
-      return projectTasks.map((task) =>
-        task.id === entry.task.id
-          ? {
-              ...task,
-              status: "Done",
-              order: doneCount,
-            }
-          : task
-      );
-    });
+        return projectTasks.map((task) =>
+          task.id === entry.task.id
+            ? {
+                ...task,
+                status: "Done",
+                order: doneCount,
+              }
+            : task
+        );
+      },
+      entry.workstream
+    );
   };
 
   const saveModalTask = (event: FormEvent<HTMLFormElement>) => {
@@ -2187,23 +2313,27 @@ export default function MyWorkPage() {
     const parsedRecurringHours = Number(modalRecurringTimePerOccurrenceHours);
     const normalizedBlockerReason = modalBlockerReason.trim();
     const nextAssignee = modalAssignee === UNASSIGNED_VALUE ? null : modalAssignee;
-    const currentProjectTasks = tasksByProject[parsedKey.projectId] ?? [];
-    const isDirectTask = parsedKey.projectId === DIRECT_TASK_PROJECT_ID;
-    const previousTask = currentProjectTasks.find(
+    const isDirectTask = parsedKey.workstream === "direct";
+    const currentProjectTasks =
+      parsedKey.workstream === "direct"
+        ? directTasks
+        : parsedKey.workstream === "development"
+          ? developmentTasksByProject[parsedKey.projectId] ?? []
+          : tasksByProject[parsedKey.projectId] ?? [];
+    const currentTask = currentProjectTasks.find(
       (task) => task.id === parsedKey.taskId
     );
-    const previousDirectTask = directTasks.find(
-      (task) => task.id === parsedKey.taskId
-    );
-    const currentTask = isDirectTask ? previousDirectTask : previousTask;
     if (!currentTask) {
       return;
     }
     const projectName =
       isDirectTask
         ? `Direct assignment by ${currentTask.assignedByName ?? "Unknown"}`
-        : projects.find((project) => project.id === parsedKey.projectId)?.name ??
-          parsedKey.projectId;
+        : parsedKey.workstream === "development"
+          ? developmentProjects.find((project) => project.id === parsedKey.projectId)
+              ?.name ?? parsedKey.projectId
+          : projects.find((project) => project.id === parsedKey.projectId)?.name ??
+            parsedKey.projectId;
 
     if (!trimmedTitle || !modalDueDate) {
       return;
@@ -2222,59 +2352,64 @@ export default function MyWorkPage() {
       currentTask.hoursAssigned !== parsedHoursAssigned;
     const nowIso = new Date().toISOString();
 
-    updateProjectTasks(parsedKey.projectId, (projectTasks) => {
-      const targetTask = projectTasks.find((task) => task.id === parsedKey.taskId);
-      if (!targetTask) {
-        return projectTasks;
-      }
+    updateProjectTasks(
+      parsedKey.projectId,
+      (projectTasks) => {
+        const targetTask = projectTasks.find((task) => task.id === parsedKey.taskId);
+        if (!targetTask) {
+          return projectTasks;
+        }
 
-      const statusChanged = targetTask.status !== modalStatus;
-      const nextOrder = statusChanged
-        ? projectTasks.filter(
-            (task) => task.status === modalStatus && task.id !== targetTask.id
-          ).length
-        : targetTask.order;
-      const validDependencyTaskIds = modalDependencyTaskIds.filter(
-        (dependencyTaskId) =>
-          dependencyTaskId !== parsedKey.taskId &&
-          projectTasks.some((task) => task.id === dependencyTaskId)
-      );
+        const statusChanged = targetTask.status !== modalStatus;
+        const nextOrder = statusChanged
+          ? projectTasks.filter(
+              (task) => task.status === modalStatus && task.id !== targetTask.id
+            ).length
+          : targetTask.order;
+        const validDependencyTaskIds = modalDependencyTaskIds.filter(
+          (dependencyTaskId) =>
+            dependencyTaskId !== parsedKey.taskId &&
+            projectTasks.some((task) => task.id === dependencyTaskId)
+        );
 
-      return projectTasks.map((task) =>
-        task.id === parsedKey.taskId
-          ? {
-              ...task,
-              title: trimmedTitle,
-              description: modalDescription.trim(),
-              dueDate: modalDueDate,
-              status: modalStatus,
-              order: nextOrder,
-              assignee: nextAssignee,
-              hoursAssigned: parsedHoursAssigned,
-              blockerReason: normalizedBlockerReason,
-              dependencyTaskIds: validDependencyTaskIds,
-              timeSpent: parsedTimeSpent,
-              priority: modalPriority,
-              subtasks: modalSubtasks,
-              isRecurring: modalIsRecurringTask,
-              recurringDays: modalIsRecurringTask ? modalRecurringDays : [],
-              recurringTimePerOccurrenceHours: modalIsRecurringTask
-                ? parsedRecurringHours
-                : 0,
-              recurringCompletions: modalIsRecurringTask
-                ? modalRecurringCompletions
-                : {},
-              assignedByName: assignmentChanged ? userName : targetTask.assignedByName,
-              assignedByUserId: assignmentChanged ? null : targetTask.assignedByUserId,
-              assignedAtIso: assignmentChanged ? nowIso : targetTask.assignedAtIso,
-            }
-          : task
-      );
-    });
+        return projectTasks.map((task) =>
+          task.id === parsedKey.taskId
+            ? {
+                ...task,
+                title: trimmedTitle,
+                description: modalDescription.trim(),
+                dueDate: modalDueDate,
+                status: modalStatus,
+                order: nextOrder,
+                assignee: nextAssignee,
+                hoursAssigned: parsedHoursAssigned,
+                blockerReason: normalizedBlockerReason,
+                dependencyTaskIds: validDependencyTaskIds,
+                timeSpent: parsedTimeSpent,
+                priority: modalPriority,
+                subtasks: modalSubtasks,
+                isRecurring: modalIsRecurringTask,
+                recurringDays: modalIsRecurringTask ? modalRecurringDays : [],
+                recurringTimePerOccurrenceHours: modalIsRecurringTask
+                  ? parsedRecurringHours
+                  : 0,
+                recurringCompletions: modalIsRecurringTask
+                  ? modalRecurringCompletions
+                  : {},
+                assignedByName: assignmentChanged ? userName : targetTask.assignedByName,
+                assignedByUserId: assignmentChanged ? null : targetTask.assignedByUserId,
+                assignedAtIso: assignmentChanged ? nowIso : targetTask.assignedAtIso,
+              }
+            : task
+        );
+      },
+      parsedKey.workstream
+    );
 
     if (!isDirectTask) {
       void recordTaskAssignmentEvent({
-        workstream: "marketing",
+        workstream:
+          parsedKey.workstream === "development" ? "development" : "marketing",
         projectId: parsedKey.projectId,
         projectName,
         taskId: currentTask.id,
@@ -2301,7 +2436,13 @@ export default function MyWorkPage() {
       return;
     }
 
-    setRecurringCompletionForDate(parsedKey.projectId, parsedKey.taskId, date, nextValue);
+    setRecurringCompletionForDate(
+      parsedKey.projectId,
+      parsedKey.taskId,
+      date,
+      nextValue,
+      parsedKey.workstream
+    );
   };
 
   const addModalSubtask = () => {
@@ -2925,7 +3066,8 @@ export default function MyWorkPage() {
                                   entry.projectId,
                                   entry.task.id,
                                   todayIsoDate,
-                                  event.target.checked
+                                  event.target.checked,
+                                  entry.workstream
                                 )
                               }
                             />
@@ -4084,7 +4226,11 @@ export default function MyWorkPage() {
                     if (!parsedKey) {
                       return;
                     }
-                    requestDeleteTask(parsedKey.projectId, parsedKey.taskId);
+                    requestDeleteTask(
+                      parsedKey.projectId,
+                      parsedKey.taskId,
+                      parsedKey.workstream
+                    );
                   }}
                   className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-100"
                 >
