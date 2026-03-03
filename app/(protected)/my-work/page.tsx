@@ -886,6 +886,7 @@ export default function MyWorkPage() {
     []
   );
   const [newCreateTaskSubtaskTitle, setNewCreateTaskSubtaskTitle] = useState("");
+  const [createTaskError, setCreateTaskError] = useState("");
 
   const [newCustomTodoTitle, setNewCustomTodoTitle] = useState("");
   const [newCustomTodoHours, setNewCustomTodoHours] = useState("");
@@ -1470,14 +1471,44 @@ export default function MyWorkPage() {
     });
   };
 
-  const createDirectTask = (task: DirectTask) => {
-    void fetch("/api/direct-tasks", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ task }),
-    });
+  const createDirectTask = async (
+    task: DirectTask
+  ): Promise<{ ok: true } | { ok: false; error: string }> => {
+    try {
+      const response = await fetch("/api/direct-tasks", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ task }),
+      });
+
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        warning?: string;
+      };
+
+      if (!response.ok) {
+        return {
+          ok: false,
+          error: payload.error ?? "Unable to create direct assignment.",
+        };
+      }
+
+      if (typeof payload.warning === "string" && payload.warning.trim()) {
+        return {
+          ok: false,
+          error: payload.warning,
+        };
+      }
+
+      return { ok: true };
+    } catch {
+      return {
+        ok: false,
+        error: "Unable to create direct assignment right now.",
+      };
+    }
   };
 
   const deleteDirectTask = (taskId: string) => {
@@ -2151,6 +2182,7 @@ export default function MyWorkPage() {
     setIsCreateTaskSubtasksEnabled(false);
     setCreateTaskSubtasks([]);
     setNewCreateTaskSubtaskTitle("");
+    setCreateTaskError("");
   };
 
   const toggleCreateTaskDependency = (taskId: string) => {
@@ -2200,8 +2232,9 @@ export default function MyWorkPage() {
     );
   };
 
-  const submitCreateTask = (event: FormEvent<HTMLFormElement>) => {
+  const submitCreateTask = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    setCreateTaskError("");
 
     const trimmedTitle = createTaskTitle.trim();
     if (!trimmedTitle || !createTaskDueDate) {
@@ -2253,8 +2286,13 @@ export default function MyWorkPage() {
         recurringCompletions: {},
       };
 
+      const createResult = await createDirectTask(newDirectTask);
+      if (!createResult.ok) {
+        setCreateTaskError(createResult.error);
+        return;
+      }
+
       setDirectTasks((currentTasks) => [newDirectTask, ...currentTasks]);
-      createDirectTask(newDirectTask);
       closeCreateTaskModal();
       return;
     }
@@ -2834,7 +2872,10 @@ export default function MyWorkPage() {
           <div className="flex flex-col items-stretch gap-2">
             <button
               type="button"
-              onClick={() => setIsCreateTaskModalOpen(true)}
+              onClick={() => {
+                setCreateTaskError("");
+                setIsCreateTaskModalOpen(true);
+              }}
               className="inline-flex items-center justify-center gap-1 rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100"
             >
               <Plus className="h-3.5 w-3.5" />
@@ -3972,68 +4013,76 @@ export default function MyWorkPage() {
                   ) : null}
                 </div>
 
-                <label className="inline-flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={createTaskIsRecurring}
-                    onChange={(event) => setCreateTaskIsRecurring(event.target.checked)}
-                  />
-                  Recurring task
-                </label>
-
-                {createTaskIsRecurring ? (
-                  <div className="rounded-md border border-black/10 p-3">
-                    <p className="text-sm font-medium">Recurring days</p>
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {RECURRING_WEEKDAY_OPTIONS.map((day) => {
-                        const isSelected = createTaskRecurringDays.includes(day);
-                        return (
-                          <button
-                            key={day}
-                            type="button"
-                            onClick={() => toggleCreateTaskRecurringDay(day)}
-                            className={`rounded-md border px-2.5 py-1 text-xs ${
-                              isSelected
-                                ? "border-black bg-black text-white"
-                                : "border-black/20 hover:bg-black/5"
-                            }`}
-                          >
-                            {day}
-                          </button>
-                        );
-                      })}
-                    </div>
-                    <label className="mt-3 block text-sm">
-                      Time per occurrence (hours)
+                <div className="space-y-4 pt-2">
+                  <div className="rounded-md border border-black/10 px-3 py-2.5">
+                    <label className="inline-flex items-center gap-2.5 text-sm font-medium leading-6">
                       <input
-                        type="number"
-                        min={0}
-                        step={0.5}
-                        value={createTaskRecurringTimePerOccurrenceHours}
-                        onChange={(event) =>
-                          setCreateTaskRecurringTimePerOccurrenceHours(
-                            event.target.value
-                          )
-                        }
-                        className="mt-1 w-full rounded-md border border-black/20 px-3 py-2"
+                        type="checkbox"
+                        checked={createTaskIsRecurring}
+                        onChange={(event) => setCreateTaskIsRecurring(event.target.checked)}
+                        className="h-4 w-4 shrink-0 rounded border-black/30"
                       />
+                      Recurring task
                     </label>
                   </div>
-                ) : null}
 
-                <label className="inline-flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={isCreateTaskSubtasksEnabled}
-                    onChange={(event) =>
-                      setIsCreateTaskSubtasksEnabled(event.target.checked)
-                    }
-                  />
-                  Add subtasks
-                </label>
+                  {createTaskIsRecurring ? (
+                    <div className="rounded-md border border-black/10 p-3">
+                      <p className="text-sm font-medium">Recurring days</p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {RECURRING_WEEKDAY_OPTIONS.map((day) => {
+                          const isSelected = createTaskRecurringDays.includes(day);
+                          return (
+                            <button
+                              key={day}
+                              type="button"
+                              onClick={() => toggleCreateTaskRecurringDay(day)}
+                              className={`rounded-md border px-2.5 py-1 text-xs ${
+                                isSelected
+                                  ? "border-black bg-black text-white"
+                                  : "border-black/20 hover:bg-black/5"
+                              }`}
+                            >
+                              {day}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <label className="mt-3 block text-sm">
+                        Time per occurrence (hours)
+                        <input
+                          type="number"
+                          min={0}
+                          step={0.5}
+                          value={createTaskRecurringTimePerOccurrenceHours}
+                          onChange={(event) =>
+                            setCreateTaskRecurringTimePerOccurrenceHours(
+                              event.target.value
+                            )
+                          }
+                          className="mt-1 w-full rounded-md border border-black/20 px-3 py-2"
+                        />
+                      </label>
+                    </div>
+                  ) : null}
+
+                  <div className="rounded-md border border-black/10 px-3 py-2.5">
+                    <label className="inline-flex items-center gap-2.5 text-sm font-medium leading-6">
+                      <input
+                        type="checkbox"
+                        checked={isCreateTaskSubtasksEnabled}
+                        onChange={(event) =>
+                          setIsCreateTaskSubtasksEnabled(event.target.checked)
+                        }
+                        className="h-4 w-4 shrink-0 rounded border-black/30"
+                      />
+                      Add subtasks
+                    </label>
+                  </div>
+                </div>
 
                 {isCreateTaskSubtasksEnabled ? (
-                  <div className="rounded-md border border-black/10 p-3">
+                  <div className="mt-1 rounded-md border border-black/10 p-3">
                     <div className="flex gap-2">
                       <input
                         type="text"
@@ -4063,6 +4112,7 @@ export default function MyWorkPage() {
                               type="checkbox"
                               checked={subtask.done}
                               onChange={() => toggleCreateTaskSubtask(subtask.id)}
+                              className="h-4 w-4 shrink-0 rounded border-black/30"
                             />
                             {subtask.title}
                           </label>
@@ -4082,7 +4132,12 @@ export default function MyWorkPage() {
                 ) : null}
               </div>
 
-              <div className="flex items-center justify-end gap-2 border-t border-black/10 px-5 py-3">
+              <div className="flex items-center justify-between gap-2 border-t border-black/10 px-5 py-3">
+                {createTaskError ? (
+                  <p className="text-xs font-medium text-red-700">{createTaskError}</p>
+                ) : (
+                  <span />
+                )}
                 <button
                   type="button"
                   onClick={closeCreateTaskModal}

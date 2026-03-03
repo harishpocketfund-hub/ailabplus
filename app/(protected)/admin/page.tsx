@@ -76,6 +76,8 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SUMMARY_MIN_WORDS = 60;
 const SUMMARY_MAX_WORDS = 90;
+const DIRECT_ASSIGNMENT_SCOPE_KEY = "__DIRECT_ASSIGNMENTS__";
+const DIRECT_ASSIGNMENT_SCOPE_LABEL = "Individual direct assignments";
 
 const subscribeToHydration = () => () => {};
 const getHydratedSnapshot = () => true;
@@ -112,8 +114,12 @@ type UnifiedTask = {
   timeSpent: number;
   blockerReason: string;
   dependencyTaskIds: string[];
+  assignedByName: string | null;
+  assignedByUserId: string | null;
+  assignedAtIso: string | null;
   isRecurring: boolean;
   recurringDays: RecurringWeekday[];
+  recurringTimePerOccurrenceHours: number;
   recurringCompletions: Record<string, boolean>;
   createdAt: string | null;
 };
@@ -173,6 +179,12 @@ type AiContextTaskRow = {
   unresolvedDependencies: number;
   daysOverdue: number;
   blocked: boolean;
+  assignedBy: string;
+  assignedAtIso: string;
+  isRecurring: boolean;
+  recurringDays: RecurringWeekday[];
+  recurringTimePerOccurrenceHours: number;
+  recurringCompletions: Record<string, boolean>;
 };
 
 type AiProjectContextRow = {
@@ -232,6 +244,13 @@ type AiDirectTaskContextRow = {
   blockerReason: string;
   dependencyTaskIds: string[];
   timeSpent: number;
+  unresolvedDependencies: number;
+  daysOverdue: number;
+  blocked: boolean;
+  isRecurring: boolean;
+  recurringDays: RecurringWeekday[];
+  recurringTimePerOccurrenceHours: number;
+  recurringCompletions: Record<string, boolean>;
 };
 
 type AiMyWorkPreferenceRow = {
@@ -275,6 +294,13 @@ type AiScopeSnapshot = {
   commitsRecent: AiCommitRow[];
   directTasks: AiDirectTaskContextRow[];
   myWorkPreferences: AiMyWorkPreferenceRow[];
+};
+
+type AiProjectOption = {
+  key: string;
+  name: string;
+  stream: Workstream | "Direct";
+  memberNames: string[];
 };
 
 function toIsoDate(date: Date): string {
@@ -799,8 +825,12 @@ export default function AdminPage() {
           timeSpent: task.timeSpent,
           blockerReason: task.blockerReason,
           dependencyTaskIds: task.dependencyTaskIds,
+          assignedByName: task.assignedByName,
+          assignedByUserId: task.assignedByUserId,
+          assignedAtIso: task.assignedAtIso,
           isRecurring: task.isRecurring,
           recurringDays: task.recurringDays,
+          recurringTimePerOccurrenceHours: task.recurringTimePerOccurrenceHours,
           recurringCompletions: task.recurringCompletions,
           createdAt: task.createdAt,
         }))
@@ -822,8 +852,12 @@ export default function AdminPage() {
           timeSpent: task.timeSpent,
           blockerReason: task.blockerReason,
           dependencyTaskIds: task.dependencyTaskIds,
+          assignedByName: task.assignedByName,
+          assignedByUserId: task.assignedByUserId,
+          assignedAtIso: task.assignedAtIso,
           isRecurring: task.isRecurring,
           recurringDays: task.recurringDays,
+          recurringTimePerOccurrenceHours: task.recurringTimePerOccurrenceHours,
           recurringCompletions: task.recurringCompletions,
           createdAt: task.createdAt,
         }))
@@ -1378,8 +1412,12 @@ export default function AdminPage() {
           timeSpent: task.timeSpent,
           blockerReason: task.blockerReason,
           dependencyTaskIds: task.dependencyTaskIds,
+          assignedByName: task.assignedByName,
+          assignedByUserId: task.assignedByUserId,
+          assignedAtIso: task.assignedAtIso,
           isRecurring: task.isRecurring,
           recurringDays: task.recurringDays,
+          recurringTimePerOccurrenceHours: task.recurringTimePerOccurrenceHours,
           recurringCompletions: task.recurringCompletions,
           createdAt: task.createdAt,
         }))
@@ -1401,8 +1439,12 @@ export default function AdminPage() {
           timeSpent: task.timeSpent,
           blockerReason: task.blockerReason,
           dependencyTaskIds: task.dependencyTaskIds,
+          assignedByName: task.assignedByName,
+          assignedByUserId: task.assignedByUserId,
+          assignedAtIso: task.assignedAtIso,
           isRecurring: task.isRecurring,
           recurringDays: task.recurringDays,
+          recurringTimePerOccurrenceHours: task.recurringTimePerOccurrenceHours,
           recurringCompletions: task.recurringCompletions,
           createdAt: task.createdAt,
         }))
@@ -1459,6 +1501,16 @@ export default function AdminPage() {
         memberNamesSet.add(name);
       }
     });
+    directTasks.forEach((task) => {
+      const assignee = task.assignee?.trim() ?? "";
+      const assignedBy = task.assignedByName?.trim() ?? "";
+      if (assignee) {
+        memberNamesSet.add(assignee);
+      }
+      if (assignedBy) {
+        memberNamesSet.add(assignedBy);
+      }
+    });
 
     return {
       today: getTodayIsoDate(),
@@ -1470,26 +1522,63 @@ export default function AdminPage() {
     developmentMembersByProject,
     developmentProjects,
     developmentTasksByProject,
+    directTasks,
     loggedPeople,
     marketingMembersByProject,
     marketingProjects,
     marketingTasksByProject,
   ]);
 
-  const aiProjectOptions = useMemo(() => {
-    if (aiSelectedMember === "All") {
-      return aiScope.projects;
-    }
-    return aiScope.projects.filter((project) => project.memberNames.includes(aiSelectedMember));
-  }, [aiScope.projects, aiSelectedMember]);
+  const directScopeMemberNames = useMemo(() => {
+    const memberNames = new Set<string>();
+    directTasks.forEach((task) => {
+      const assignee = task.assignee?.trim() ?? "";
+      const assignedBy = task.assignedByName?.trim() ?? "";
+      if (assignee) {
+        memberNames.add(assignee);
+      }
+      if (assignedBy) {
+        memberNames.add(assignedBy);
+      }
+    });
+    return [...memberNames].sort((a, b) => a.localeCompare(b));
+  }, [directTasks]);
+
+  const aiProjectOptions = useMemo<AiProjectOption[]>(() => {
+    const projects =
+      aiSelectedMember === "All"
+        ? aiScope.projects
+        : aiScope.projects.filter((project) => project.memberNames.includes(aiSelectedMember));
+
+    const projectOptions: AiProjectOption[] = projects.map((project) => ({
+      key: project.key,
+      name: project.name,
+      stream: project.stream,
+      memberNames: project.memberNames,
+    }));
+
+    projectOptions.push({
+      key: DIRECT_ASSIGNMENT_SCOPE_KEY,
+      name: DIRECT_ASSIGNMENT_SCOPE_LABEL,
+      stream: "Direct",
+      memberNames: directScopeMemberNames,
+    });
+
+    return projectOptions;
+  }, [aiScope.projects, aiSelectedMember, directScopeMemberNames]);
 
   const aiMemberOptions = useMemo(() => {
     if (aiSelectedProjectKey === "All") {
       return aiScope.memberNames;
     }
+    if (aiSelectedProjectKey === DIRECT_ASSIGNMENT_SCOPE_KEY) {
+      return directScopeMemberNames.length > 0
+        ? directScopeMemberNames
+        : aiScope.memberNames;
+    }
     const selectedProject = aiScope.projects.find((project) => project.key === aiSelectedProjectKey);
     return selectedProject ? selectedProject.memberNames : aiScope.memberNames;
-  }, [aiScope.memberNames, aiScope.projects, aiSelectedProjectKey]);
+  }, [aiScope.memberNames, aiScope.projects, aiSelectedProjectKey, directScopeMemberNames]);
 
   const aiMemberValue = aiMemberOptions.includes(aiSelectedMember) ? aiSelectedMember : "All";
   const aiProjectValue = aiProjectOptions.some((project) => project.key === aiSelectedProjectKey)
@@ -1502,9 +1591,13 @@ export default function AdminPage() {
   }): AiScopeSnapshot => {
     const scopeMember = overrides?.member ?? aiMemberValue;
     const scopeProjectKey = overrides?.projectKey ?? aiProjectValue;
+    const isDirectOnlyScope = scopeProjectKey === DIRECT_ASSIGNMENT_SCOPE_KEY;
     const today = aiScope.today;
 
     const scopedProjects = aiScope.projects.filter((project) => {
+      if (isDirectOnlyScope) {
+        return false;
+      }
       if (scopeProjectKey !== "All" && project.key !== scopeProjectKey) {
         return false;
       }
@@ -1516,6 +1609,9 @@ export default function AdminPage() {
     const scopedProjectKeys = new Set(scopedProjects.map((project) => project.key));
 
     const scopedTasks = aiScope.tasks.filter((task) => {
+      if (isDirectOnlyScope) {
+        return false;
+      }
       if (!scopedProjectKeys.has(task.projectKey)) {
         return false;
       }
@@ -1578,6 +1674,12 @@ export default function AdminPage() {
         unresolvedDependencies,
         daysOverdue,
         blocked,
+        assignedBy: task.assignedByName?.trim() || "Unknown",
+        assignedAtIso: task.assignedAtIso ?? "",
+        isRecurring: task.isRecurring,
+        recurringDays: task.recurringDays,
+        recurringTimePerOccurrenceHours: task.recurringTimePerOccurrenceHours,
+        recurringCompletions: task.recurringCompletions,
       };
     };
 
@@ -1646,10 +1748,12 @@ export default function AdminPage() {
     const selectedProject =
       scopeProjectKey === "All"
         ? null
-        : aiScope.projects.find((project) => project.key === scopeProjectKey) ?? null;
+        : aiProjectOptions.find((project) => project.key === scopeProjectKey) ?? null;
     const scopeMemberLabel = scopeMember === "All" ? "All team members" : scopeMember;
     const scopeProjectLabel = selectedProject
-      ? `${selectedProject.name} (${selectedProject.stream})`
+      ? selectedProject.stream === "Direct"
+        ? selectedProject.name
+        : `${selectedProject.name} (${selectedProject.stream})`
       : "All projects";
 
     const statusCounts: Record<TaskStatus, number> = {
@@ -1744,7 +1848,6 @@ export default function AdminPage() {
         }
       }
     });
-
     const teamLoad = [...teamLoadMap.values()]
       .filter((row) => row.assignedHours > 0 || row.allocatedHours > 0)
       .sort((a, b) => {
@@ -1802,31 +1905,73 @@ export default function AdminPage() {
       .sort((a, b) => parseTime(b.changedAtIso) - parseTime(a.changedAtIso))
       .slice(0, 120);
 
-    const directTasksContext = directTasks
+    const includeDirectAssignments =
+      scopeProjectKey === "All" || scopeProjectKey === DIRECT_ASSIGNMENT_SCOPE_KEY;
+    const directStatusByTaskId = new Map(
+      directTasks.map((task) => [task.id, task.status] as const)
+    );
+    const directTasksContext = (includeDirectAssignments ? directTasks : [])
       .filter((task) => {
         if (scopeMember !== "All") {
           const assignee = task.assignee?.trim() ?? "";
           const assignedBy = task.assignedByName?.trim() ?? "";
-          return normalizeName(assignee) === normalizeName(scopeMember) || normalizeName(assignedBy) === normalizeName(scopeMember);
+          return (
+            normalizeName(assignee) === normalizeName(scopeMember) ||
+            normalizeName(assignedBy) === normalizeName(scopeMember)
+          );
         }
         return true;
       })
-      .map((task) => ({
-        id: task.id,
-        title: task.title,
-        description: task.description,
-        dueDate: task.dueDate,
-        status: task.status,
-        priority: task.priority,
-        assignee: task.assignee ?? "Unassigned",
-        assignedBy: task.assignedByName ?? "Unknown",
-        assignedAtIso: task.assignedAtIso ?? "",
-        hoursAssigned: task.hoursAssigned,
-        blockerReason: task.blockerReason,
-        dependencyTaskIds: task.dependencyTaskIds,
-        timeSpent: task.timeSpent,
-      }))
-      .slice(0, 120);
+      .map((task) => {
+        const dueDate = task.dueDate;
+        const dueDays = getDaysFromToday(dueDate, today);
+        const daysOverdue =
+          task.status !== "Done" && dueDays !== null && dueDays < 0 ? Math.abs(dueDays) : 0;
+        const unresolvedDependencies = task.dependencyTaskIds.filter((dependencyId) => {
+          const dependencyStatus = directStatusByTaskId.get(dependencyId);
+          return dependencyStatus !== undefined && dependencyStatus !== "Done";
+        }).length;
+        const blocked =
+          task.blockerReason.trim().length > 0 || unresolvedDependencies > 0;
+
+        return {
+          id: task.id,
+          title: task.title,
+          description: task.description,
+          dueDate,
+          status: task.status,
+          priority: task.priority,
+          assignee: task.assignee ?? "Unassigned",
+          assignedBy: task.assignedByName ?? "Unknown",
+          assignedAtIso: task.assignedAtIso ?? "",
+          hoursAssigned: task.hoursAssigned,
+          blockerReason: task.blockerReason,
+          dependencyTaskIds: task.dependencyTaskIds,
+          timeSpent: task.timeSpent,
+          unresolvedDependencies,
+          daysOverdue,
+          blocked,
+          isRecurring: task.isRecurring,
+          recurringDays: task.recurringDays,
+          recurringTimePerOccurrenceHours: task.recurringTimePerOccurrenceHours,
+          recurringCompletions: task.recurringCompletions,
+        } satisfies AiDirectTaskContextRow;
+      })
+      .slice(0, 180);
+    const directOpenTasks = directTasksContext.filter((task) => task.status !== "Done");
+    const directOverdueTasks = directOpenTasks.filter((task) => task.daysOverdue > 0);
+    const directDueTodayTasks = directOpenTasks.filter((task) => task.dueDate === today);
+    const directDueThisWeekTasks = directOpenTasks.filter((task) => {
+      const days = getDaysFromToday(task.dueDate, today);
+      return days !== null && days > 0 && days <= 7;
+    });
+    const directHighPriorityOpen = directOpenTasks.filter(
+      (task) => task.priority === "High"
+    );
+    const directBlockedOpen = directOpenTasks.filter((task) => task.blocked);
+    directTasksContext.forEach((task) => {
+      statusCounts[task.status] += 1;
+    });
 
     const myWorkPreferencesContext = myWorkPreferences
       .filter((preference) => {
@@ -1844,15 +1989,20 @@ export default function AdminPage() {
         project: scopeProjectLabel,
       },
       summary: {
-        projects: scopedProjects.length,
-        tasks: scopedTasks.length,
-        open: openTasks.length,
-        done: scopedTasks.length - openTasks.length,
-        overdue: overdueTasks.length,
-        dueToday: dueTodayTasks.length,
-        dueThisWeek: dueThisWeekTasks.length,
-        highPriorityOpen: highPriorityOpen.length,
-        blockedOpen: blockedTasks.length,
+        projects:
+          scopedProjects.length +
+          (scopeProjectKey === DIRECT_ASSIGNMENT_SCOPE_KEY ? 1 : 0),
+        tasks: scopedTasks.length + directTasksContext.length,
+        open: openTasks.length + directOpenTasks.length,
+        done:
+          scopedTasks.length -
+          openTasks.length +
+          (directTasksContext.length - directOpenTasks.length),
+        overdue: overdueTasks.length + directOverdueTasks.length,
+        dueToday: dueTodayTasks.length + directDueTodayTasks.length,
+        dueThisWeek: dueThisWeekTasks.length + directDueThisWeekTasks.length,
+        highPriorityOpen: highPriorityOpen.length + directHighPriorityOpen.length,
+        blockedOpen: blockedTasks.length + directBlockedOpen.length,
       },
       statusCounts,
       topOverdue,
@@ -2555,8 +2705,12 @@ export default function AdminPage() {
                       const selectedProject =
                         aiProjectValue === "All"
                           ? null
-                          : aiScope.projects.find((project) => project.key === aiProjectValue) ?? null;
-                      if (selectedProject && nextMember !== "All" && !selectedProject.memberNames.includes(nextMember)) {
+                          : aiProjectOptions.find((project) => project.key === aiProjectValue) ?? null;
+                      if (
+                        selectedProject &&
+                        nextMember !== "All" &&
+                        !selectedProject.memberNames.includes(nextMember)
+                      ) {
                         setAiSelectedProjectKey("All");
                       }
                     }}
@@ -2581,7 +2735,9 @@ export default function AdminPage() {
                       if (nextProject === "All" || aiMemberValue === "All") {
                         return;
                       }
-                      const selectedProject = aiScope.projects.find((project) => project.key === nextProject);
+                      const selectedProject = aiProjectOptions.find(
+                        (project) => project.key === nextProject
+                      );
                       if (!selectedProject || !selectedProject.memberNames.includes(aiMemberValue)) {
                         setAiSelectedMember("All");
                       }
@@ -2591,7 +2747,9 @@ export default function AdminPage() {
                     <option value="All">All</option>
                     {aiProjectOptions.map((project) => (
                       <option key={`ai-project:${project.key}`} value={project.key}>
-                        {project.name} ({project.stream})
+                        {project.stream === "Direct"
+                          ? project.name
+                          : `${project.name} (${project.stream})`}
                       </option>
                     ))}
                   </select>

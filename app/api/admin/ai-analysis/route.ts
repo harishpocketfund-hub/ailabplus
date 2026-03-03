@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/auth/session";
 
 export const runtime = "nodejs";
+type RecurringWeekday = "Mon" | "Tue" | "Wed" | "Thu" | "Fri" | "Sat" | "Sun";
 
 type AiContextTaskRow = {
   id: string;
@@ -22,6 +23,12 @@ type AiContextTaskRow = {
   unresolvedDependencies: number;
   daysOverdue: number;
   blocked: boolean;
+  assignedBy: string;
+  assignedAtIso: string;
+  isRecurring: boolean;
+  recurringDays: RecurringWeekday[];
+  recurringTimePerOccurrenceHours: number;
+  recurringCompletions: Record<string, boolean>;
 };
 
 type AiProjectContextRow = {
@@ -81,6 +88,13 @@ type AiDirectTaskContextRow = {
   blockerReason: string;
   dependencyTaskIds: string[];
   timeSpent: number;
+  unresolvedDependencies: number;
+  daysOverdue: number;
+  blocked: boolean;
+  isRecurring: boolean;
+  recurringDays: RecurringWeekday[];
+  recurringTimePerOccurrenceHours: number;
+  recurringCompletions: Record<string, boolean>;
 };
 
 type AiMyWorkPreferenceRow = {
@@ -149,6 +163,28 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function isRecurringWeekday(value: unknown): value is RecurringWeekday {
+  return (
+    value === "Mon" ||
+    value === "Tue" ||
+    value === "Wed" ||
+    value === "Thu" ||
+    value === "Fri" ||
+    value === "Sat" ||
+    value === "Sun"
+  );
+}
+
+function isRecurringCompletions(value: unknown): value is Record<string, boolean> {
+  if (!isObjectRecord(value)) {
+    return false;
+  }
+
+  return Object.entries(value).every(
+    ([dateKey, done]) => /^\d{4}-\d{2}-\d{2}$/.test(dateKey) && typeof done === "boolean"
+  );
+}
+
 function isAiContextTaskRow(value: unknown): value is AiContextTaskRow {
   if (!isObjectRecord(value)) {
     return false;
@@ -175,7 +211,14 @@ function isAiContextTaskRow(value: unknown): value is AiContextTaskRow {
     value.dependencyTaskIds.every((id) => typeof id === "string") &&
     typeof value.unresolvedDependencies === "number" &&
     typeof value.daysOverdue === "number" &&
-    typeof value.blocked === "boolean"
+    typeof value.blocked === "boolean" &&
+    typeof value.assignedBy === "string" &&
+    typeof value.assignedAtIso === "string" &&
+    typeof value.isRecurring === "boolean" &&
+    Array.isArray(value.recurringDays) &&
+    value.recurringDays.every((day) => isRecurringWeekday(day)) &&
+    typeof value.recurringTimePerOccurrenceHours === "number" &&
+    isRecurringCompletions(value.recurringCompletions)
   );
 }
 
@@ -266,7 +309,15 @@ function isAiDirectTaskContextRow(value: unknown): value is AiDirectTaskContextR
     typeof value.blockerReason === "string" &&
     Array.isArray(value.dependencyTaskIds) &&
     value.dependencyTaskIds.every((dependencyId) => typeof dependencyId === "string") &&
-    typeof value.timeSpent === "number"
+    typeof value.timeSpent === "number" &&
+    typeof value.unresolvedDependencies === "number" &&
+    typeof value.daysOverdue === "number" &&
+    typeof value.blocked === "boolean" &&
+    typeof value.isRecurring === "boolean" &&
+    Array.isArray(value.recurringDays) &&
+    value.recurringDays.every((day) => isRecurringWeekday(day)) &&
+    typeof value.recurringTimePerOccurrenceHours === "number" &&
+    isRecurringCompletions(value.recurringCompletions)
   );
 }
 
@@ -373,6 +424,8 @@ function buildSystemPrompt(intent: QueryIntent): string {
     "3) Prefer specific task/project names and metrics over generic statements.",
     "4) Keep language clear and executive-friendly.",
     "5) If a section has no evidence, return exactly: \"No evidence-backed points.\"",
+    "6) Use all context blocks when relevant: projects/tasks, direct assignments, recurring schedules/completions, commits, and My Work preferences.",
+    "7) If direct assignments or recurring evidence exists in scope, include them in analysis instead of ignoring them.",
     "",
     "Formatting policy:",
     "- Do NOT force a fixed template for every question.",
@@ -446,6 +499,7 @@ function buildCompactSummarySystemPrompt(): string {
     "Generate exactly one concise portfolio summary in 60 to 90 words.",
     "Use ONLY provided evidence from context JSON.",
     "Mention both Marketing and Development explicitly.",
+    "Include direct assignments and recurring execution signals when evidence exists.",
     "Do not hallucinate, speculate, or infer unsupported consequences.",
     "Do not invent risk if there is no explicit evidence (overdue, blockerReason, unresolved dependency, high-priority open, or measurable load mismatch).",
     "Include one evidence-backed risk and one immediate focus based on explicit metrics.",
@@ -524,6 +578,7 @@ function buildIntentGuidance(intent: QueryIntent): string {
       "Intent: this week plan.",
       "Build a simple execution plan for next 7 days from context.todayIso.",
       "Prioritize overdue first, then due soon, then blocked/dependency work that needs unblocking.",
+      "Include recurring commitments and direct assignments if present in scope.",
       "Use plain English and practical sequencing.",
       "If no relevant tasks exist, return exactly: None right now.",
     ].join("\n");
@@ -533,6 +588,7 @@ function buildIntentGuidance(intent: QueryIntent): string {
     return [
       "Intent: today's tasks.",
       "Answer only tasks due today (and urgent overdue carryover if explicitly needed by question).",
+      "Include due recurring occurrences and direct assignments when present in context.",
       "Use plain English, short actionable bullets.",
       "If none exist, return exactly: None right now.",
     ].join("\n");
