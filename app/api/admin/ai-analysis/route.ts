@@ -111,6 +111,25 @@ type AiMyWorkPreferenceRow = {
   updatedAtIso: string;
 };
 
+type AiRecurringContextRow = {
+  source: "project" | "direct";
+  taskId: string;
+  title: string;
+  stream: "Marketing" | "Development" | "Direct";
+  projectName: string;
+  assignee: string;
+  assignedBy: string;
+  status: "To Do" | "In Progress" | "Review" | "Done";
+  priority: "High" | "Medium" | "Low";
+  dueDate: string;
+  recurringDays: RecurringWeekday[];
+  recurringTimePerOccurrenceHours: number;
+  expectedThisWeek: number;
+  doneThisWeek: number;
+  dueToday: boolean;
+  nextOccurrenceDate: string | null;
+};
+
 type AiScopeSnapshot = {
   todayIso: string;
   scope: {
@@ -142,6 +161,14 @@ type AiScopeSnapshot = {
   teamLoad: AiTeamLoadRow[];
   commitsRecent: AiCommitRow[];
   directTasks: AiDirectTaskContextRow[];
+  recurring: {
+    totalRecurringTasks: number;
+    projectRecurringTasks: number;
+    directRecurringTasks: number;
+    dueToday: number;
+    dueThisWeek: number;
+    rows: AiRecurringContextRow[];
+  };
   myWorkPreferences: AiMyWorkPreferenceRow[];
 };
 
@@ -156,6 +183,7 @@ type QueryIntent =
   | "overdue_deep_dive"
   | "weekly_plan"
   | "today_tasks"
+  | "recurring_focus"
   | "blocked_dependencies"
   | "general";
 
@@ -345,6 +373,37 @@ function isAiMyWorkPreferenceRow(value: unknown): value is AiMyWorkPreferenceRow
   );
 }
 
+function isAiRecurringContextRow(value: unknown): value is AiRecurringContextRow {
+  if (!isObjectRecord(value)) {
+    return false;
+  }
+
+  return (
+    (value.source === "project" || value.source === "direct") &&
+    typeof value.taskId === "string" &&
+    typeof value.title === "string" &&
+    (value.stream === "Marketing" ||
+      value.stream === "Development" ||
+      value.stream === "Direct") &&
+    typeof value.projectName === "string" &&
+    typeof value.assignee === "string" &&
+    typeof value.assignedBy === "string" &&
+    (value.status === "To Do" ||
+      value.status === "In Progress" ||
+      value.status === "Review" ||
+      value.status === "Done") &&
+    (value.priority === "High" || value.priority === "Medium" || value.priority === "Low") &&
+    typeof value.dueDate === "string" &&
+    Array.isArray(value.recurringDays) &&
+    value.recurringDays.every((day) => isRecurringWeekday(day)) &&
+    typeof value.recurringTimePerOccurrenceHours === "number" &&
+    typeof value.expectedThisWeek === "number" &&
+    typeof value.doneThisWeek === "number" &&
+    typeof value.dueToday === "boolean" &&
+    (value.nextOccurrenceDate === null || typeof value.nextOccurrenceDate === "string")
+  );
+}
+
 function isAiScopeSnapshot(value: unknown): value is AiScopeSnapshot {
   if (!isObjectRecord(value)) {
     return false;
@@ -354,7 +413,8 @@ function isAiScopeSnapshot(value: unknown): value is AiScopeSnapshot {
     typeof value.todayIso !== "string" ||
     !isObjectRecord(value.scope) ||
     !isObjectRecord(value.summary) ||
-    !isObjectRecord(value.statusCounts)
+    !isObjectRecord(value.statusCounts) ||
+    !isObjectRecord(value.recurring)
   ) {
     return false;
   }
@@ -374,7 +434,12 @@ function isAiScopeSnapshot(value: unknown): value is AiScopeSnapshot {
     typeof value.statusCounts["To Do"] !== "number" ||
     typeof value.statusCounts["In Progress"] !== "number" ||
     typeof value.statusCounts.Review !== "number" ||
-    typeof value.statusCounts.Done !== "number"
+    typeof value.statusCounts.Done !== "number" ||
+    typeof value.recurring.totalRecurringTasks !== "number" ||
+    typeof value.recurring.projectRecurringTasks !== "number" ||
+    typeof value.recurring.directRecurringTasks !== "number" ||
+    typeof value.recurring.dueToday !== "number" ||
+    typeof value.recurring.dueThisWeek !== "number"
   ) {
     return false;
   }
@@ -397,6 +462,8 @@ function isAiScopeSnapshot(value: unknown): value is AiScopeSnapshot {
     value.commitsRecent.every(isAiCommitRow) &&
     Array.isArray(value.directTasks) &&
     value.directTasks.every(isAiDirectTaskContextRow) &&
+    Array.isArray(value.recurring.rows) &&
+    value.recurring.rows.every(isAiRecurringContextRow) &&
     Array.isArray(value.myWorkPreferences) &&
     value.myWorkPreferences.every(isAiMyWorkPreferenceRow)
   );
@@ -426,6 +493,7 @@ function buildSystemPrompt(intent: QueryIntent): string {
     "5) If a section has no evidence, return exactly: \"No evidence-backed points.\"",
     "6) Use all context blocks when relevant: projects/tasks, direct assignments, recurring schedules/completions, commits, and My Work preferences.",
     "7) If direct assignments or recurring evidence exists in scope, include them in analysis instead of ignoring them.",
+    "8) Treat context.recurring.rows as authoritative recurring evidence.",
     "",
     "Formatting policy:",
     "- Do NOT force a fixed template for every question.",
@@ -553,6 +621,14 @@ function detectQueryIntent(question: string): QueryIntent {
     return "today_tasks";
   }
   if (
+    q.includes("recurring") ||
+    q.includes("repeat") ||
+    q.includes("weekly checklist") ||
+    q.includes("weekly recurrence")
+  ) {
+    return "recurring_focus";
+  }
+  if (
     q.includes("blocker") ||
     q.includes("dependency") ||
     q.includes("blocked")
@@ -591,6 +667,15 @@ function buildIntentGuidance(intent: QueryIntent): string {
       "Include due recurring occurrences and direct assignments when present in context.",
       "Use plain English, short actionable bullets.",
       "If none exist, return exactly: None right now.",
+    ].join("\n");
+  }
+
+  if (intent === "recurring_focus") {
+    return [
+      "Intent: recurring execution focus.",
+      "Use context.recurring as primary evidence and include both project and direct recurring tasks when present.",
+      "For each relevant task include: pattern days, expected vs done this week, due-today signal, and next occurrence date.",
+      "If no recurring tasks exist in scope, return exactly: None right now.",
     ].join("\n");
   }
 

@@ -267,6 +267,25 @@ type AiMyWorkPreferenceRow = {
   updatedAtIso: string;
 };
 
+type AiRecurringContextRow = {
+  source: "project" | "direct";
+  taskId: string;
+  title: string;
+  stream: Workstream | "Direct";
+  projectName: string;
+  assignee: string;
+  assignedBy: string;
+  status: TaskStatus;
+  priority: TaskPriority;
+  dueDate: string;
+  recurringDays: RecurringWeekday[];
+  recurringTimePerOccurrenceHours: number;
+  expectedThisWeek: number;
+  doneThisWeek: number;
+  dueToday: boolean;
+  nextOccurrenceDate: string | null;
+};
+
 type AiScopeSnapshot = {
   todayIso: string;
   scope: {
@@ -293,6 +312,14 @@ type AiScopeSnapshot = {
   teamLoad: AiTeamLoadRow[];
   commitsRecent: AiCommitRow[];
   directTasks: AiDirectTaskContextRow[];
+  recurring: {
+    totalRecurringTasks: number;
+    projectRecurringTasks: number;
+    directRecurringTasks: number;
+    dueToday: number;
+    dueThisWeek: number;
+    rows: AiRecurringContextRow[];
+  };
   myWorkPreferences: AiMyWorkPreferenceRow[];
 };
 
@@ -566,6 +593,11 @@ export default function AdminPage() {
     { label: "Overdue tasks", prompt: "Show overdue tasks and what to fix first." },
     { label: "Today's tasks", prompt: "What tasks are due today and what should be prioritized?" },
     { label: "This week plan", prompt: "Give me a plan for this week based on open tasks." },
+    {
+      label: "Recurring",
+      prompt:
+        "Show recurring tasks from both projects and individual direct assignments with this week's expected vs done and what needs attention.",
+    },
     { label: "Main bottlenecks", prompt: "What are the main bottlenecks right now?" },
   ] as const;
 
@@ -1958,6 +1990,107 @@ export default function AdminPage() {
         } satisfies AiDirectTaskContextRow;
       })
       .slice(0, 180);
+
+    const currentWeekDates = getCurrentWeekDates(today);
+    const getRecurringWeekMeta = (
+      recurringDays: RecurringWeekday[],
+      dueDate: string,
+      recurringCompletions: Record<string, boolean>
+    ) => {
+      const validWeekDates = currentWeekDates.filter(
+        (entry) =>
+          recurringDays.includes(entry.weekday) &&
+          (!dueDate || dueDate.length === 0 || entry.date <= dueDate)
+      );
+      const expectedThisWeek = validWeekDates.length;
+      const doneThisWeek = validWeekDates.filter(
+        (entry) => recurringCompletions[entry.date] === true
+      ).length;
+      const dueToday = validWeekDates.some((entry) => entry.date === today);
+      const nextOccurrenceDate =
+        validWeekDates.find((entry) => entry.date >= today)?.date ?? null;
+
+      return {
+        expectedThisWeek,
+        doneThisWeek,
+        dueToday,
+        nextOccurrenceDate,
+      };
+    };
+
+    const projectRecurringRows: AiRecurringContextRow[] = tasksDetailed
+      .filter((task) => task.isRecurring && task.recurringDays.length > 0)
+      .map((task) => {
+        const recurringMeta = getRecurringWeekMeta(
+          task.recurringDays,
+          task.dueDate,
+          task.recurringCompletions
+        );
+        return {
+          source: "project",
+          taskId: task.id,
+          title: task.title,
+          stream: task.stream,
+          projectName: task.projectName,
+          assignee: task.assignee,
+          assignedBy: task.assignedBy,
+          status: task.status,
+          priority: task.priority,
+          dueDate: task.dueDate,
+          recurringDays: task.recurringDays,
+          recurringTimePerOccurrenceHours: task.recurringTimePerOccurrenceHours,
+          expectedThisWeek: recurringMeta.expectedThisWeek,
+          doneThisWeek: recurringMeta.doneThisWeek,
+          dueToday: recurringMeta.dueToday,
+          nextOccurrenceDate: recurringMeta.nextOccurrenceDate,
+        } satisfies AiRecurringContextRow;
+      });
+
+    const directRecurringRows: AiRecurringContextRow[] = directTasksContext
+      .filter((task) => task.isRecurring && task.recurringDays.length > 0)
+      .map((task) => {
+        const recurringMeta = getRecurringWeekMeta(
+          task.recurringDays,
+          task.dueDate,
+          task.recurringCompletions
+        );
+        return {
+          source: "direct",
+          taskId: task.id,
+          title: task.title,
+          stream: "Direct",
+          projectName: DIRECT_ASSIGNMENT_SCOPE_LABEL,
+          assignee: task.assignee,
+          assignedBy: task.assignedBy,
+          status: task.status,
+          priority: task.priority,
+          dueDate: task.dueDate,
+          recurringDays: task.recurringDays,
+          recurringTimePerOccurrenceHours: task.recurringTimePerOccurrenceHours,
+          expectedThisWeek: recurringMeta.expectedThisWeek,
+          doneThisWeek: recurringMeta.doneThisWeek,
+          dueToday: recurringMeta.dueToday,
+          nextOccurrenceDate: recurringMeta.nextOccurrenceDate,
+        } satisfies AiRecurringContextRow;
+      });
+
+    const allRecurringRows = [...projectRecurringRows, ...directRecurringRows];
+    const recurringRows = allRecurringRows
+      .slice()
+      .sort((firstRow, secondRow) => {
+        if (firstRow.dueToday !== secondRow.dueToday) {
+          return firstRow.dueToday ? -1 : 1;
+        }
+        if (firstRow.expectedThisWeek !== secondRow.expectedThisWeek) {
+          return secondRow.expectedThisWeek - firstRow.expectedThisWeek;
+        }
+        if (firstRow.doneThisWeek !== secondRow.doneThisWeek) {
+          return firstRow.doneThisWeek - secondRow.doneThisWeek;
+        }
+        return firstRow.title.localeCompare(secondRow.title);
+      })
+      .slice(0, 240);
+
     const directOpenTasks = directTasksContext.filter((task) => task.status !== "Done");
     const directOverdueTasks = directOpenTasks.filter((task) => task.daysOverdue > 0);
     const directDueTodayTasks = directOpenTasks.filter((task) => task.dueDate === today);
@@ -2013,6 +2146,14 @@ export default function AdminPage() {
       teamLoad,
       commitsRecent,
       directTasks: directTasksContext,
+      recurring: {
+        totalRecurringTasks: allRecurringRows.length,
+        projectRecurringTasks: projectRecurringRows.length,
+        directRecurringTasks: directRecurringRows.length,
+        dueToday: allRecurringRows.filter((row) => row.dueToday).length,
+        dueThisWeek: allRecurringRows.filter((row) => row.expectedThisWeek > 0).length,
+        rows: recurringRows,
+      },
       myWorkPreferences: myWorkPreferencesContext,
     };
   };
