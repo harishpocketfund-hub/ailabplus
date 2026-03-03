@@ -2248,6 +2248,10 @@ export default function MyWorkPage() {
     if (!Number.isFinite(parsedRecurringHours) || parsedRecurringHours < 0) {
       return;
     }
+    if (createTaskIsRecurring && createTaskRecurringDays.length === 0) {
+      setCreateTaskError("Select at least one recurring day.");
+      return;
+    }
 
     const resolvedAssignee =
       createTaskAssignee === UNASSIGNED_VALUE || !createTaskAssignee
@@ -4019,7 +4023,13 @@ export default function MyWorkPage() {
                       <input
                         type="checkbox"
                         checked={createTaskIsRecurring}
-                        onChange={(event) => setCreateTaskIsRecurring(event.target.checked)}
+                        onChange={(event) => {
+                          const isEnabled = event.target.checked;
+                          setCreateTaskIsRecurring(isEnabled);
+                          if (isEnabled && createTaskRecurringDays.length === 0) {
+                            setCreateTaskRecurringDays([todayWeekday]);
+                          }
+                        }}
                         className="h-4 w-4 shrink-0 rounded border-black/30"
                       />
                       Recurring task

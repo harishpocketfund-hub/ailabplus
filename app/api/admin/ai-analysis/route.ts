@@ -520,6 +520,211 @@ function isAllMembersScope(member: string): boolean {
   );
 }
 
+function getIsoDateMs(value: string): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return null;
+  }
+
+  const dateMs = Date.parse(`${value}T00:00:00`);
+  return Number.isNaN(dateMs) ? null : dateMs;
+}
+
+function addIsoDays(value: string, days: number): string {
+  const baseMs = getIsoDateMs(value);
+  if (baseMs === null) {
+    return value;
+  }
+
+  const date = new Date(baseMs + days * 24 * 60 * 60 * 1000);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function isOpenStatus(status: AiContextTaskRow["status"]): boolean {
+  return status !== "Done";
+}
+
+function buildIntentEvidence(
+  context: AiScopeSnapshot,
+  intent: QueryIntent
+): Record<string, unknown> {
+  const todayIso = context.todayIso;
+
+  if (intent === "overdue_deep_dive") {
+    const overdueProjectTasks = context.tasksDetailed
+      .filter((task) => isOpenStatus(task.status) && task.daysOverdue > 0)
+      .sort((firstTask, secondTask) => secondTask.daysOverdue - firstTask.daysOverdue)
+      .slice(0, 200);
+    const overdueDirectTasks = context.directTasks
+      .filter((task) => isOpenStatus(task.status) && task.daysOverdue > 0)
+      .sort((firstTask, secondTask) => secondTask.daysOverdue - firstTask.daysOverdue)
+      .slice(0, 200);
+    const overdueRecurring = context.recurring.rows
+      .filter(
+        (row) =>
+          row.status !== "Done" &&
+          /^\d{4}-\d{2}-\d{2}$/.test(row.dueDate) &&
+          row.dueDate < todayIso
+      )
+      .slice(0, 200);
+    const overdueProjectKeys = new Set(overdueProjectTasks.map((task) => task.projectKey));
+    const overdueTaskIds = new Set([
+      ...overdueProjectTasks.map((task) => task.id),
+      ...overdueDirectTasks.map((task) => task.id),
+    ]);
+
+    return {
+      intent,
+      scope: context.scope,
+      todayIso,
+      summary: {
+        overdueProjectTasks: overdueProjectTasks.length,
+        overdueDirectAssignments: overdueDirectTasks.length,
+        overdueRecurringRows: overdueRecurring.length,
+      },
+      overdueProjectTasks,
+      overdueDirectTasks,
+      overdueRecurring,
+      projects: context.projectsDetailed.filter((project) =>
+        overdueProjectKeys.has(project.projectKey)
+      ),
+      commits: context.commitsRecent
+        .filter(
+          (commit) =>
+            (commit.taskId.length > 0 && overdueTaskIds.has(commit.taskId)) ||
+            /due|deadline|status|blocker|depend/i.test(commit.field)
+        )
+        .slice(0, 120),
+    };
+  }
+
+  if (intent === "today_tasks") {
+    const dueTodayProjectTasks = context.tasksDetailed
+      .filter(
+        (task) =>
+          isOpenStatus(task.status) &&
+          /^\d{4}-\d{2}-\d{2}$/.test(task.dueDate) &&
+          task.dueDate === todayIso
+      )
+      .slice(0, 200);
+    const dueTodayDirectTasks = context.directTasks
+      .filter(
+        (task) =>
+          isOpenStatus(task.status) &&
+          /^\d{4}-\d{2}-\d{2}$/.test(task.dueDate) &&
+          task.dueDate === todayIso
+      )
+      .slice(0, 200);
+    const dueTodayRecurring = context.recurring.rows
+      .filter((row) => row.status !== "Done" && row.dueToday)
+      .slice(0, 200);
+
+    return {
+      intent,
+      scope: context.scope,
+      todayIso,
+      summary: {
+        dueTodayProjectTasks: dueTodayProjectTasks.length,
+        dueTodayDirectAssignments: dueTodayDirectTasks.length,
+        dueTodayRecurringRows: dueTodayRecurring.length,
+      },
+      dueTodayProjectTasks,
+      dueTodayDirectTasks,
+      dueTodayRecurring,
+    };
+  }
+
+  if (intent === "weekly_plan") {
+    const weekEndIso = addIsoDays(todayIso, 7);
+    const inWeekOrOverdueProjectTasks = context.tasksDetailed
+      .filter((task) => {
+        if (!isOpenStatus(task.status)) {
+          return false;
+        }
+        if (task.daysOverdue > 0) {
+          return true;
+        }
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(task.dueDate)) {
+          return false;
+        }
+        return task.dueDate >= todayIso && task.dueDate <= weekEndIso;
+      })
+      .slice(0, 240);
+    const inWeekOrOverdueDirectTasks = context.directTasks
+      .filter((task) => {
+        if (!isOpenStatus(task.status)) {
+          return false;
+        }
+        if (task.daysOverdue > 0) {
+          return true;
+        }
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(task.dueDate)) {
+          return false;
+        }
+        return task.dueDate >= todayIso && task.dueDate <= weekEndIso;
+      })
+      .slice(0, 240);
+    const recurringThisWeek = context.recurring.rows
+      .filter((row) => row.status !== "Done" && row.expectedThisWeek > 0)
+      .slice(0, 240);
+
+    return {
+      intent,
+      scope: context.scope,
+      todayIso,
+      weekEndIso,
+      summary: {
+        inWeekOrOverdueProjectTasks: inWeekOrOverdueProjectTasks.length,
+        inWeekOrOverdueDirectAssignments: inWeekOrOverdueDirectTasks.length,
+        recurringThisWeek: recurringThisWeek.length,
+      },
+      inWeekOrOverdueProjectTasks,
+      inWeekOrOverdueDirectTasks,
+      recurringThisWeek,
+    };
+  }
+
+  if (intent === "blocked_dependencies") {
+    const blockedProjectTasks = context.tasksDetailed
+      .filter((task) => isOpenStatus(task.status) && task.blocked)
+      .slice(0, 220);
+    const blockedDirectTasks = context.directTasks
+      .filter((task) => isOpenStatus(task.status) && task.blocked)
+      .slice(0, 220);
+
+    return {
+      intent,
+      scope: context.scope,
+      todayIso,
+      summary: {
+        blockedProjectTasks: blockedProjectTasks.length,
+        blockedDirectAssignments: blockedDirectTasks.length,
+      },
+      blockedProjectTasks,
+      blockedDirectTasks,
+    };
+  }
+
+  if (intent === "recurring_focus") {
+    return {
+      intent,
+      scope: context.scope,
+      todayIso,
+      recurring: context.recurring,
+      recurringProjectTasks: context.tasksDetailed
+        .filter((task) => task.isRecurring)
+        .slice(0, 260),
+      recurringDirectAssignments: context.directTasks
+        .filter((task) => task.isRecurring)
+        .slice(0, 260),
+    };
+  }
+
+  return context;
+}
+
 function buildIndividualOpeningRule(context: AiScopeSnapshot): string {
   if (isAllMembersScope(context.scope.member)) {
     return "";
@@ -540,7 +745,8 @@ function buildUserPrompt(
   context: AiScopeSnapshot,
   intent: QueryIntent
 ): string {
-  const contextJson = JSON.stringify(context, null, 2);
+  const evidence = buildIntentEvidence(context, intent);
+  const evidenceJson = JSON.stringify(evidence, null, 2);
   const individualOpeningRule = buildIndividualOpeningRule(context);
   return [
     `Detected intent: ${intent}`,
@@ -554,9 +760,10 @@ function buildUserPrompt(
         ]
       : []),
     "",
-    "Context JSON:",
-    contextJson,
+    "Evidence JSON (intent-scoped):",
+    evidenceJson,
     "",
+    "Use only this evidence JSON. Ignore any category not present in evidence.",
     "Answer in simple English and follow intent guidance.",
   ].join("\n");
 }
@@ -643,6 +850,7 @@ function buildIntentGuidance(intent: QueryIntent): string {
     return [
       "Intent: overdue tasks deep dive.",
       "Answer only for overdue open tasks in scope.",
+      "Do not mention tasks due today, this week, or future dates unless they are already overdue.",
       "For each relevant task include: overdue days, blocker reason (or 'None right now'), unresolved dependencies, and due-date/deadline commit evidence if available.",
       "Explain in plain English, concise and useful.",
       "If no overdue tasks exist, return exactly: None right now.",
@@ -693,6 +901,7 @@ function buildIntentGuidance(intent: QueryIntent): string {
     "Answer the user question directly in simple English.",
     "Use structure only when it improves clarity.",
     "Avoid dumping raw data; synthesize key points from evidence.",
+    "Do not mention unrelated data categories if the question is specific.",
   ].join("\n");
 }
 
@@ -746,7 +955,7 @@ async function requestOpenAiAnswer(
     throw new Error("OPENAI_API_KEY is not configured.");
   }
 
-  const model = "gpt-4o-mini";
+  const model = process.env.OPENAI_ANALYSIS_MODEL?.trim() || "gpt-4";
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {

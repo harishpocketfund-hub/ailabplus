@@ -1018,6 +1018,7 @@ export default function MarketingProjectPage() {
   const [recurringDays, setRecurringDays] = useState<MarketingRecurringWeekday[]>([]);
   const [recurringTimePerOccurrenceHours, setRecurringTimePerOccurrenceHours] =
     useState("0");
+  const [taskFormError, setTaskFormError] = useState("");
   const [isCreateSubtasksEnabled, setIsCreateSubtasksEnabled] = useState(false);
   const [createSubtasks, setCreateSubtasks] = useState<MarketingSubtask[]>([]);
   const [newCreateSubtaskTitle, setNewCreateSubtaskTitle] = useState("");
@@ -1346,6 +1347,7 @@ export default function MarketingProjectPage() {
   const filterQuery = searchFilter.trim().toLowerCase();
   const todayString = getTodayDateString();
   const todayMs = getDateMsFromIsoDate(todayString) ?? 0;
+  const todayWeekday = getWeekdayFromDate(new Date(todayMs));
   const currentWeekDates = useMemo(
     () => getWeekDatesForReference(todayMs),
     [todayMs]
@@ -2291,6 +2293,7 @@ export default function MarketingProjectPage() {
   };
 
   const openCreateTaskForm = () => {
+    setTaskFormError("");
     setTaskTitle("");
     setDescription("");
     setDueDate("");
@@ -2310,6 +2313,7 @@ export default function MarketingProjectPage() {
   };
 
   const closeTaskForm = () => {
+    setTaskFormError("");
     setTaskTitle("");
     setDescription("");
     setDueDate("");
@@ -2383,6 +2387,7 @@ export default function MarketingProjectPage() {
 
   const onSubmitTask = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    setTaskFormError("");
 
     const trimmedTaskTitle = taskTitle.trim();
     if (!trimmedTaskTitle || !dueDate) {
@@ -2399,6 +2404,10 @@ export default function MarketingProjectPage() {
       !Number.isFinite(parsedRecurringTimePerOccurrenceHours) ||
       parsedRecurringTimePerOccurrenceHours < 0
     ) {
+      return;
+    }
+    if (isRecurringTask && recurringDays.length === 0) {
+      setTaskFormError("Select at least one recurring day.");
       return;
     }
     const normalizedBlockerReason = taskBlockerReason.trim();
@@ -3409,7 +3418,13 @@ export default function MarketingProjectPage() {
                     <input
                       type="checkbox"
                       checked={isRecurringTask}
-                      onChange={(event) => setIsRecurringTask(event.target.checked)}
+                      onChange={(event) => {
+                        const isEnabled = event.target.checked;
+                        setIsRecurringTask(isEnabled);
+                        if (isEnabled && recurringDays.length === 0) {
+                          setRecurringDays([todayWeekday]);
+                        }
+                      }}
                     />
                     Recurring task
                   </label>
@@ -3513,7 +3528,13 @@ export default function MarketingProjectPage() {
                   ) : null}
                 </div>
 
-                <div className="mt-4 flex gap-3">
+                <div className="mt-4 flex items-center justify-between gap-3">
+                  {taskFormError ? (
+                    <p className="text-xs font-medium text-red-700">{taskFormError}</p>
+                  ) : (
+                    <span />
+                  )}
+                  <div className="flex gap-3">
                   <button
                     type="submit"
                     className="rounded-md bg-black px-4 py-2 text-sm font-medium text-white hover:opacity-90"
@@ -3527,6 +3548,7 @@ export default function MarketingProjectPage() {
                   >
                     Cancel
                   </button>
+                  </div>
                 </div>
               </form>
             ) : null}
