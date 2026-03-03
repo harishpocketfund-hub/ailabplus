@@ -85,6 +85,7 @@ import {
 } from "@/lib/development-tasks";
 import { fetchUserPreference, saveUserPreference } from "@/lib/preferences-client";
 import { recordTaskAssignmentEvent } from "@/lib/assignment-events-client";
+import MentionTextField from "@/components/mention-text-field";
 import {
   createDirectTaskId,
   parseDirectTasks,
@@ -101,7 +102,13 @@ const subscribeToHydration = () => () => {};
 const getHydratedSnapshot = () => true;
 const getHydratedServerSnapshot = () => false;
 
-type MyWorkTab = "all" | "overdue" | "today" | "week" | "recurring";
+type MyWorkTab =
+  | "all"
+  | "overdue"
+  | "today"
+  | "week"
+  | "tagged"
+  | "recurring";
 type MyWorkStatusFilter = MarketingTaskStatus | typeof ALL_FILTER_VALUE;
 type MyWorkPriorityFilter = MarketingTaskPriority | typeof ALL_FILTER_VALUE;
 type MyWorkDueFilter =
@@ -153,6 +160,7 @@ type TaskEntry = {
   workstream: "marketing" | "development" | "direct";
   projectId: string;
   projectName: string;
+  projectTags: string[];
   projectHref: string | null;
   contextLabel: string;
   task: MarketingTask;
@@ -219,6 +227,7 @@ const isMyWorkTab = (value: unknown): value is MyWorkTab => {
     value === "overdue" ||
     value === "today" ||
     value === "week" ||
+    value === "tagged" ||
     value === "recurring"
   );
 };
@@ -572,6 +581,56 @@ const getDueLabel = (dueDate: string, todayIsoDate: string): string => {
   return `In ${dayDiff} days`;
 };
 
+const escapeRegExp = (value: string): string =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const buildMentionTokens = (userName: string): string[] => {
+  const trimmedUserName = userName.trim();
+  if (!trimmedUserName) {
+    return [];
+  }
+
+  const firstToken = trimmedUserName.split(/\s+/)[0]?.trim() ?? "";
+  const tokens = [trimmedUserName];
+  if (
+    firstToken.length >= 2 &&
+    firstToken.toLowerCase() !== trimmedUserName.toLowerCase()
+  ) {
+    tokens.push(firstToken);
+  }
+
+  const seen = new Set<string>();
+  return tokens.filter((token) => {
+    const normalized = token.toLowerCase();
+    if (seen.has(normalized)) {
+      return false;
+    }
+    seen.add(normalized);
+    return true;
+  });
+};
+
+const hasMentionToken = (value: string, mentionTokens: string[]): boolean => {
+  if (!value.trim() || mentionTokens.length === 0) {
+    return false;
+  }
+
+  return mentionTokens.some((token) => {
+    const pattern = new RegExp(
+      `(^|[\\s([{])@${escapeRegExp(token)}(?=\\s|$|[.,!?;:)\\]])`,
+      "i"
+    );
+    return pattern.test(value);
+  });
+};
+
+const isTaggedForUser = (
+  task: MarketingTask,
+  mentionTokens: string[]
+): boolean =>
+  hasMentionToken(task.description, mentionTokens) ||
+  hasMentionToken(task.blockerReason, mentionTokens);
+
 const matchesDueFilter = (
   task: MarketingTask,
   dueFilter: MyWorkDueFilter,
@@ -648,6 +707,9 @@ const matchesTab = (
       task.dueDate > todayIsoDate &&
       task.dueDate <= weekEndIsoDate
     );
+  }
+  if (tab === "tagged") {
+    return false;
   }
   return isRecurringForDate(task, todayIsoDate, todayWeekday);
 };
@@ -772,6 +834,7 @@ export default function MyWorkPage() {
 
   const user = parseDemoUser(rawUser);
   const userName = user?.name ?? "";
+  const mentionTokens = useMemo(() => buildMentionTokens(userName), [userName]);
   const projects = parseMarketingProjects(rawProjects);
   const tasksByProject = parseMarketingTasksByProject(rawTasksByProject);
   const membersByProject = parseMarketingMembersByProject(rawMembersByProject);
@@ -904,6 +967,7 @@ export default function MyWorkPage() {
           workstream: "marketing",
           projectId,
           projectName: project.name,
+          projectTags: project.tags,
           projectHref: `/marketing/projects/${projectId}`,
           contextLabel: project.name,
           members,
@@ -924,6 +988,7 @@ export default function MyWorkPage() {
         workstream: "direct",
         projectId: DIRECT_TASK_PROJECT_ID,
         projectName: `Direct assignment by ${assignedBy}`,
+        projectTags: [],
         projectHref: null,
         contextLabel: `Direct assignment by ${assignedBy}`,
         members: directTaskMembers,
@@ -933,6 +998,122 @@ export default function MyWorkPage() {
 
     return entries;
   }, [directTaskMembers, directTasks, membersByProject, projects, tasksByProject, userName]);
+
+  const taggedMentionEntries = useMemo(() => {
+    if (!userName.trim() || mentionTokens.length === 0) {
+      return [] as TaskEntry[];
+    }
+
+    const byKey = new Map<string, TaskEntry>();
+    const marketingProjectById = new Map(projects.map((project) => [project.id, project]));
+    const developmentProjectById = new Map(
+      developmentProjects.map((project) => [project.id, project])
+    );
+
+    Object.entries(tasksByProject).forEach(([projectId, projectTasks]) => {
+      const project = marketingProjectById.get(projectId);
+      if (!project) {
+        return;
+      }
+
+      const members = membersByProject[projectId] ?? [];
+      projectTasks.forEach((task) => {
+        if (task.status === "Done" || !isTaggedForUser(task, mentionTokens)) {
+          return;
+        }
+
+        const key = getTaskKey("marketing", projectId, task.id);
+        byKey.set(key, {
+          key,
+          source: "project",
+          workstream: "marketing",
+          projectId,
+          projectName: project.name,
+          projectTags: project.tags,
+          projectHref: `/marketing/projects/${projectId}`,
+          contextLabel: project.name,
+          members,
+          task,
+        });
+      });
+    });
+
+    Object.entries(developmentTasksByProject).forEach(([projectId, projectTasks]) => {
+      const project = developmentProjectById.get(projectId);
+      if (!project) {
+        return;
+      }
+
+      const members = developmentMembersByProject[projectId] ?? [];
+      projectTasks.forEach((task) => {
+        if (task.status === "Done" || !isTaggedForUser(task, mentionTokens)) {
+          return;
+        }
+
+        const key = getTaskKey("development", projectId, task.id);
+        byKey.set(key, {
+          key,
+          source: "project",
+          workstream: "development",
+          projectId,
+          projectName: project.name,
+          projectTags: project.tags,
+          projectHref: `/development/projects/${projectId}`,
+          contextLabel: project.name,
+          members,
+          task,
+        });
+      });
+    });
+
+    directTasks.forEach((task) => {
+      if (task.status === "Done" || !isTaggedForUser(task, mentionTokens)) {
+        return;
+      }
+
+      const key = getTaskKey("direct", DIRECT_TASK_PROJECT_ID, task.id);
+      byKey.set(key, {
+        key,
+        source: "direct",
+        workstream: "direct",
+        projectId: DIRECT_TASK_PROJECT_ID,
+        projectName: "Individual",
+        projectTags: [],
+        projectHref: null,
+        contextLabel: `Direct assignment by ${task.assignedByName ?? "Unknown"}`,
+        members: directTaskMembers,
+        task,
+      });
+    });
+
+    return [...byKey.values()].sort((firstEntry, secondEntry) => {
+      const firstDueDate = firstEntry.task.dueDate || "9999-12-31";
+      const secondDueDate = secondEntry.task.dueDate || "9999-12-31";
+      if (firstDueDate !== secondDueDate) {
+        return firstDueDate.localeCompare(secondDueDate);
+      }
+
+      const priorityDiff =
+        getPriorityWeight(firstEntry.task.priority) -
+        getPriorityWeight(secondEntry.task.priority);
+      if (priorityDiff !== 0) {
+        return priorityDiff;
+      }
+
+      return firstEntry.task.title.localeCompare(secondEntry.task.title);
+    });
+  }, [
+    developmentMembersByProject,
+    developmentProjects,
+    developmentTasksByProject,
+    directTaskMembers,
+    directTasks,
+    membersByProject,
+    mentionTokens,
+    projects,
+    tasksByProject,
+    userName,
+  ]);
 
   const summaryAssignedTasks = useMemo(() => {
     const normalizedUserName = userName.trim().toLowerCase();
@@ -1075,6 +1256,7 @@ export default function MyWorkPage() {
           workstream: "marketing",
           projectId,
           projectName: project.name,
+          projectTags: project.tags,
           projectHref: `/marketing/projects/${projectId}`,
           contextLabel: project.name,
           members: membersByProject[projectId] ?? [],
@@ -1104,6 +1286,7 @@ export default function MyWorkPage() {
           workstream: "development",
           projectId,
           projectName: project.name,
+          projectTags: project.tags,
           projectHref: `/development/projects/${projectId}`,
           contextLabel: project.name,
           members: developmentMembersByProject[projectId] ?? [],
@@ -1127,6 +1310,7 @@ export default function MyWorkPage() {
         workstream: "direct",
         projectId: DIRECT_TASK_PROJECT_ID,
         projectName: "Individual",
+        projectTags: [],
         projectHref: null,
         contextLabel: `Direct assignment by ${task.assignedByName ?? "Unknown"}`,
         members: directTaskMembers,
@@ -1216,6 +1400,7 @@ export default function MyWorkPage() {
       overdue: [],
       today: [],
       week: [],
+      tagged: [],
       recurring: [],
     };
 
@@ -1230,13 +1415,22 @@ export default function MyWorkPage() {
       if (matchesTab(entry.task, "week", todayIsoDate, weekEndIsoDate, todayWeekday)) {
         byTab.week.push(entry);
       }
+      if (isTaggedForUser(entry.task, mentionTokens)) {
+        byTab.tagged.push(entry);
+      }
       if (matchesTab(entry.task, "recurring", todayIsoDate, weekEndIsoDate, todayWeekday)) {
         byTab.recurring.push(entry);
       }
     });
 
     return byTab;
-  }, [filteredAssignedByMeEntries, todayIsoDate, todayWeekday, weekEndIsoDate]);
+  }, [
+    filteredAssignedByMeEntries,
+    mentionTokens,
+    todayIsoDate,
+    todayWeekday,
+    weekEndIsoDate,
+  ]);
 
   const currentAssignedByMeEntries = useMemo(() => {
     if (assignedByMeTab === "all") {
@@ -1251,14 +1445,20 @@ export default function MyWorkPage() {
     if (assignedByMeTab === "week") {
       return assignedByMeEntriesByTab.week;
     }
+    if (assignedByMeTab === "tagged") {
+      return assignedByMeEntriesByTab.tagged;
+    }
     return assignedByMeEntriesByTab.recurring;
   }, [assignedByMeEntriesByTab, assignedByMeTab]);
 
   const taskEntryByKey = useMemo(() => {
     return new Map(
-      [...taskEntries, ...assignedByMeEntries].map((entry) => [entry.key, entry])
+      [...taggedMentionEntries, ...taskEntries, ...assignedByMeEntries].map((entry) => [
+        entry.key,
+        entry,
+      ])
     );
-  }, [assignedByMeEntries, taskEntries]);
+  }, [assignedByMeEntries, taggedMentionEntries, taskEntries]);
 
   const persistDirectTasks = (nextTasks: DirectTask[]) => {
     void fetch("/api/direct-tasks", {
@@ -1496,6 +1696,30 @@ export default function MyWorkPage() {
       });
     });
 
+    Object.entries(developmentTasksByProject).forEach(([projectId, projectTasks]) => {
+      const statusByTaskId = new Map(
+        projectTasks.map((task) => [task.id, task.status] as const)
+      );
+
+      projectTasks.forEach((task) => {
+        const unresolvedDependencies = task.dependencyTaskIds.reduce(
+          (count, dependencyId) => {
+            const dependencyStatus = statusByTaskId.get(dependencyId);
+            if (!dependencyStatus || dependencyStatus !== "Done") {
+              return count + 1;
+            }
+            return count;
+          },
+          0
+        );
+
+        counts.set(
+          getTaskKey("development", projectId, task.id),
+          unresolvedDependencies
+        );
+      });
+    });
+
     const directStatusByTaskId = new Map(
       directTasks.map((task) => [task.id, task.status] as const)
     );
@@ -1518,7 +1742,7 @@ export default function MyWorkPage() {
     });
 
     return counts;
-  }, [directTasks, tasksByProject]);
+  }, [developmentTasksByProject, directTasks, tasksByProject]);
 
   const filteredEntries = useMemo(() => {
     return taskEntries.filter((entry) => {
@@ -1551,6 +1775,37 @@ export default function MyWorkPage() {
     weekEndIsoDate,
   ]);
 
+  const filteredTaggedEntries = useMemo(() => {
+    return taggedMentionEntries.filter((entry) => {
+      if (entry.task.status === "Done") {
+        return false;
+      }
+
+      if (!matchesFilters(entry.task, filters, todayIsoDate, weekEndIsoDate)) {
+        return false;
+      }
+
+      const unresolvedDependencies =
+        unresolvedDependencyCountByTaskKey.get(entry.key) ?? 0;
+
+      if (filters.onlyBlocked && entry.task.blockerReason.trim().length === 0) {
+        return false;
+      }
+
+      if (filters.onlyDependent && unresolvedDependencies === 0) {
+        return false;
+      }
+
+      return true;
+    });
+  }, [
+    filters,
+    taggedMentionEntries,
+    todayIsoDate,
+    unresolvedDependencyCountByTaskKey,
+    weekEndIsoDate,
+  ]);
+
   const sortedFilteredEntries = useMemo(() => {
     return [...filteredEntries].sort((firstEntry, secondEntry) => {
       const firstDueDate = firstEntry.task.dueDate || "9999-12-31";
@@ -1570,12 +1825,32 @@ export default function MyWorkPage() {
     });
   }, [filteredEntries]);
 
+  const sortedFilteredTaggedEntries = useMemo(() => {
+    return [...filteredTaggedEntries].sort((firstEntry, secondEntry) => {
+      const firstDueDate = firstEntry.task.dueDate || "9999-12-31";
+      const secondDueDate = secondEntry.task.dueDate || "9999-12-31";
+      if (firstDueDate !== secondDueDate) {
+        return firstDueDate.localeCompare(secondDueDate);
+      }
+
+      const priorityDiff =
+        getPriorityWeight(firstEntry.task.priority) -
+        getPriorityWeight(secondEntry.task.priority);
+      if (priorityDiff !== 0) {
+        return priorityDiff;
+      }
+
+      return firstEntry.task.title.localeCompare(secondEntry.task.title);
+    });
+  }, [filteredTaggedEntries]);
+
   const queueEntriesByTab = useMemo(() => {
     const byTab: Record<MyWorkTab, TaskEntry[]> = {
       all: [],
       overdue: [],
       today: [],
       week: [],
+      tagged: [],
       recurring: [],
     };
 
@@ -1602,6 +1877,7 @@ export default function MyWorkPage() {
   const overdueEntries = queueEntriesByTab.overdue;
   const todayEntries = queueEntriesByTab.today;
   const weekEntries = queueEntriesByTab.week;
+  const taggedEntries = sortedFilteredTaggedEntries;
   const recurringEntries = queueEntriesByTab.recurring;
 
   const overdueCount = useMemo(
@@ -1784,8 +2060,19 @@ export default function MyWorkPage() {
     if (activeTab === "week") {
       return weekEntries;
     }
+    if (activeTab === "tagged") {
+      return taggedEntries;
+    }
     return recurringEntries;
-  }, [activeTab, allEntries, overdueEntries, recurringEntries, todayEntries, weekEntries]);
+  }, [
+    activeTab,
+    allEntries,
+    overdueEntries,
+    recurringEntries,
+    taggedEntries,
+    todayEntries,
+    weekEntries,
+  ]);
   const sortedQueueEntries = useMemo(() => {
     return [...currentQueueEntries].sort((firstEntry, secondEntry) => {
       const firstDueDate = firstEntry.task.dueDate || "9999-12-31";
@@ -2515,6 +2802,9 @@ export default function MyWorkPage() {
     if (tab === "week") {
       return "Nothing else due this week.";
     }
+    if (tab === "tagged") {
+      return "No tasks where you are mentioned right now.";
+    }
     return "No recurring tasks for today.";
   };
 
@@ -2789,6 +3079,7 @@ export default function MyWorkPage() {
                   { id: "overdue", label: "Overdue", count: overdueEntries.length },
                   { id: "today", label: "Today", count: todayEntries.length },
                   { id: "week", label: "This week", count: weekEntries.length },
+                  { id: "tagged", label: "Tagged", count: taggedEntries.length },
                   { id: "recurring", label: "Recurring", count: recurringEntries.length },
                 ] as Array<{ id: MyWorkTab; label: string; count: number }>).map(
                   (tab) => (
@@ -3560,11 +3851,13 @@ export default function MyWorkPage() {
 
                 <label className="block">
                   <span className="text-sm font-medium">Description</span>
-                  <textarea
+                  <MentionTextField
                     value={createTaskDescription}
-                    onChange={(event) => setCreateTaskDescription(event.target.value)}
+                    onChange={setCreateTaskDescription}
+                    mentionOptions={createTaskAssigneeOptions}
+                    multiline
                     rows={3}
-                    className="mt-1 w-full rounded-md border border-black/15 px-3 py-2 text-sm"
+                    className="w-full rounded-md border border-black/15 px-3 py-2 text-sm"
                   />
                 </label>
 
@@ -3625,12 +3918,12 @@ export default function MyWorkPage() {
 
                 <label className="block">
                   <span className="text-sm font-medium">Blocker (optional)</span>
-                  <input
-                    type="text"
+                  <MentionTextField
                     value={createTaskBlockerReason}
-                    onChange={(event) => setCreateTaskBlockerReason(event.target.value)}
+                    onChange={setCreateTaskBlockerReason}
+                    mentionOptions={createTaskAssigneeOptions}
                     placeholder="Waiting on legal approval, assets, feedback..."
-                    className="mt-1 w-full rounded-md border border-black/20 px-3 py-2 text-sm"
+                    className="w-full rounded-md border border-black/20 px-3 py-2 text-sm"
                   />
                 </label>
 
@@ -3926,11 +4219,13 @@ export default function MyWorkPage() {
 
                 <label className="block">
                   <span className="text-sm font-medium">Description</span>
-                  <textarea
+                  <MentionTextField
                     value={modalDescription}
-                    onChange={(event) => setModalDescription(event.target.value)}
+                    onChange={setModalDescription}
+                    mentionOptions={modalAssigneeOptions}
+                    multiline
                     rows={3}
-                    className="mt-1 w-full rounded-md border border-black/15 px-3 py-2 text-sm"
+                    className="w-full rounded-md border border-black/15 px-3 py-2 text-sm"
                   />
                 </label>
 
@@ -3971,12 +4266,12 @@ export default function MyWorkPage() {
 
                 <label className="block">
                   <span className="text-sm font-medium">Blocker (optional)</span>
-                  <input
-                    type="text"
+                  <MentionTextField
                     value={modalBlockerReason}
-                    onChange={(event) => setModalBlockerReason(event.target.value)}
+                    onChange={setModalBlockerReason}
+                    mentionOptions={modalAssigneeOptions}
                     placeholder="What is blocking this task?"
-                    className="mt-1 w-full rounded-md border border-black/15 px-3 py-2 text-sm"
+                    className="w-full rounded-md border border-black/15 px-3 py-2 text-sm"
                   />
                 </label>
 

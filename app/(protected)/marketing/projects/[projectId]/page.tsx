@@ -90,6 +90,7 @@ import {
 } from "@/lib/marketing-tasks";
 import { fetchUserPreference, saveUserPreference } from "@/lib/preferences-client";
 import { recordTaskAssignmentEvent } from "@/lib/assignment-events-client";
+import MentionTextField from "@/components/mention-text-field";
 
 const UNASSIGNED_VALUE = "__UNASSIGNED__";
 const ALL_FILTER_VALUE = "__ALL__";
@@ -983,6 +984,24 @@ export default function MarketingProjectPage() {
   const [teamEditRows, setTeamEditRows] = useState<TeamEditRow[]>([]);
   const [teamEditError, setTeamEditError] = useState("");
   const [loggedPeople, setLoggedPeople] = useState<LoggedPerson[]>([]);
+  const mentionOptions = useMemo(() => {
+    const options = new Set<string>();
+    members.forEach((member) => {
+      const memberName = formatMemberName(member).trim();
+      if (memberName) {
+        options.add(memberName);
+      }
+    });
+    loggedPeople.forEach((person) => {
+      const personName = person.name.trim();
+      if (personName) {
+        options.add(personName);
+      }
+    });
+    return [...options].sort((firstName, secondName) =>
+      firstName.localeCompare(secondName)
+    );
+  }, [loggedPeople, members]);
 
   const [isTaskFormOpen, setIsTaskFormOpen] = useState(false);
   const [activeTasksTab, setActiveTasksTab] = useState<TasksSectionTab>("tasks");
@@ -3262,11 +3281,13 @@ export default function MarketingProjectPage() {
 
                   <label className="text-sm">
                     Description
-                    <textarea
+                    <MentionTextField
                       value={description}
-                      onChange={(event) => setDescription(event.target.value)}
+                      onChange={setDescription}
+                      mentionOptions={mentionOptions}
+                      multiline
                       rows={4}
-                      className="mt-1 w-full rounded-md border border-black/20 px-3 py-2"
+                      className="w-full rounded-md border border-black/20 px-3 py-2"
                     />
                   </label>
 
@@ -3330,12 +3351,12 @@ export default function MarketingProjectPage() {
 
                   <label className="text-sm">
                     Blocker (optional)
-                    <input
-                      type="text"
+                    <MentionTextField
                       value={taskBlockerReason}
-                      onChange={(event) => setTaskBlockerReason(event.target.value)}
+                      onChange={setTaskBlockerReason}
+                      mentionOptions={mentionOptions}
                       placeholder="Waiting on legal approval, assets, feedback..."
-                      className="mt-1 w-full rounded-md border border-black/20 px-3 py-2"
+                      className="w-full rounded-md border border-black/20 px-3 py-2"
                     />
                   </label>
 
@@ -4462,11 +4483,13 @@ export default function MarketingProjectPage() {
 
                 <label className="text-sm">
                   Description
-                  <textarea
+                  <MentionTextField
                     value={modalDescription}
-                    onChange={(event) => setModalDescription(event.target.value)}
+                    onChange={setModalDescription}
+                    mentionOptions={mentionOptions}
+                    multiline
                     rows={3}
-                    className="mt-1 w-full rounded-md border border-black/20 px-3 py-2"
+                    className="w-full rounded-md border border-black/20 px-3 py-2"
                   />
                 </label>
 
@@ -4509,12 +4532,12 @@ export default function MarketingProjectPage() {
 
                 <label className="text-sm">
                   Blocker (optional)
-                  <input
-                    type="text"
+                  <MentionTextField
                     value={modalBlockerReason}
-                    onChange={(event) => setModalBlockerReason(event.target.value)}
+                    onChange={setModalBlockerReason}
+                    mentionOptions={mentionOptions}
                     placeholder="What is blocking this task?"
-                    className="mt-1 w-full rounded-md border border-black/20 px-3 py-2"
+                    className="w-full rounded-md border border-black/20 px-3 py-2"
                   />
                 </label>
 
